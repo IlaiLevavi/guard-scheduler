@@ -69,6 +69,8 @@ td.pc{text-align:center;cursor:pointer;min-width:62px;user-select:none}
 td.pc.home{background:var(--bad-bg)}
 td.pc.part{background:var(--warn-bg)}
 td.pc.here{background:transparent}
+.stat{padding:2px 9px;border-radius:99px;font-size:13px;white-space:nowrap}
+.stat.here{background:var(--chip);color:var(--ok)}.stat.home{background:var(--bad-bg);color:var(--bad)}.stat.part{background:var(--warn-bg)}
 th.sticky,td.sticky{position:sticky;inset-inline-start:0;background:var(--panel);z-index:1}
 .bar{height:8px;background:var(--accent);border-radius:4px;min-width:2px}
 .overlay{position:fixed;inset:0;background:rgba(0,0,0,.45);display:flex;align-items:center;justify-content:center;z-index:50;padding:12px}
@@ -353,7 +355,7 @@ const SRC = '<!DOCTYPE html>\n' + document.documentElement.outerHTML;
 const KEY = 'guard-scheduler-v1';
 const $ = s => document.querySelector(s);
 const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-const ui = { tab: 'sched', day: null, view: 'task', pDay: null };
+const ui = { tab: 'pres', day: null, view: 'task', pDay: null };
 let S, undoStack = [];
 
 function loadState() {
@@ -385,7 +387,7 @@ function ask(msg, ok) {
 }
 
 // ---------- render ----------
-const TABS = [['sched', 'שיבוץ'], ['pres', 'נוכחות'], ['set', 'הגדרות'], ['stats', 'סטטיסטיקה'], ['share', 'שיתוף']];
+const TABS = [['pres', 'נוכחות'], ['sched', 'שיבוץ'], ['set', 'הגדרות'], ['stats', 'סטטיסטיקה'], ['share', 'שיתוף']];
 function render() {
   const y = window.scrollY, now = Date.now(), issues = validate(S, now);
   const body = { sched: renderSched, pres: renderPres, set: renderSet, stats: renderStats, share: renderShare }[ui.tab](issues);
@@ -466,36 +468,61 @@ function renderByPerson(slots, day) {
   return `<div class="panel scroll"><table><tr><th>חייל</th><th>משמרות ביום זה</th></tr>${rows.join('')}</table></div>`;
 }
 
+function absLabel(pid, day) {
+  const ds = day, de = addDays(day, 1), l = S.absences.filter(a => a.pid === pid && a.from < de && a.to > ds);
+  if (!l.length) return { cls: 'here', txt: 'בבסיס' };
+  if (absentMs(S, pid, ds, de) >= 24 * H) return { cls: 'home', txt: 'בבית כל היום' };
+  return { cls: 'part', txt: 'יוצא: ' + l.map(a => (a.from <= ds ? 'מתחילת היום' : fmtT(a.from)) + '–' + (a.to >= de ? 'סוף היום' : fmtT(a.to))).join(', ') };
+}
 function renderPres() {
   const days = dayList(); if (!days.length) return '';
-  pickDay(days); if (!days.includes(ui.pDay)) ui.pDay = ui.day;
-  const now = Date.now();
+  const day = pickDay(days);
   const cnt = d => S.soldiers.filter(p => absentMs(S, p.id, d, addDays(d, 1)) < 24 * H).length;
-  const grid = `<div class="panel scroll"><table><tr><th class="sticky">חייל</th>${days.map(d => `<th style="text-align:center">${fmtDay(d)}<br><span class="muted">${cnt(d)}/${S.soldiers.length} נוכחים</span></th>`).join('')}</tr>
-    ${S.soldiers.map(p => `<tr><td class="sticky">${esc(p.name)} ${p.role === 'commander' ? '<span class="tag">מפקד</span>' : ''}</td>${days.map(d => {
+  const rows = S.soldiers.map(p => {
+    const l = absLabel(p.id, day), allDay = l.cls === 'home';
+    return `<tr><td><input data-f="soldier" data-id="${p.id}" data-k="name" value="${esc(p.name)}" style="width:100%;min-width:130px"></td>
+      <td>${p.role === 'commander' ? '<span class="tag">מפקד</span>' : ''}</td>
+      <td><span class="stat ${l.cls}">${esc(l.txt)}</span></td>
+      <td><div class="row" style="gap:4px;flex-wrap:nowrap">
+        <button class="btn sm ${allDay ? 'sec' : 'danger'}" data-act="toggleDay" data-p="${p.id}" data-d="${day}">${allDay ? '✔ החזר לבסיס' : '🏠 בבית היום'}</button>
+        <button class="btn sm sec" data-act="openAbs" data-p="${p.id}">⏱ יציאה / ימים</button>
+        <button class="btn sm sec" title="מחק חייל" data-act="delSoldier" data-id="${p.id}">🗑</button></div></td></tr>`;
+  }).join('');
+  const grid = `<div class="panel scroll"><h3>מבט על כל הימים</h3><table><tr><th class="sticky">חייל</th>${days.map(d => `<th style="text-align:center">${fmtDay(d)}<br><span class="muted">${cnt(d)}/${S.soldiers.length}</span></th>`).join('')}</tr>
+    ${S.soldiers.map(p => `<tr><td class="sticky">${esc(p.name)}</td>${days.map(d => {
       const ms = absentMs(S, p.id, d, addDays(d, 1)), c = ms >= 24 * H ? 'home' : ms > 0 ? 'part' : 'here';
       const tip = S.absences.filter(a => a.pid === p.id && a.from < addDays(d, 1) && a.to > d).map(a => fmtDT(a.from) + ' → ' + fmtDT(a.to)).join('\n');
       return `<td class="pc ${c}" title="${esc(tip)}" data-act="toggleDay" data-p="${p.id}" data-d="${d}">${c === 'home' ? '🏠' : c === 'part' ? '◐' : '✔'}</td>`;
-    }).join('')}</tr>`).join('')}</table><p class="muted">לחיצה על משבצת = כל היום בבית / נוכח. ליציאה בשעות מסוימות השתמש בטופס שלמטה.</p></div>`;
-  const dflt = n => toLocalInput(n);
-  const form = `<div class="panel"><h3>הוספת יציאה (טווח שעות)</h3>
-    <details open><summary>בחר חיילים</summary><div class="grid2" id="absPick" style="margin:8px 0">${S.soldiers.map(p => `<label><input type="checkbox" value="${p.id}"> ${esc(p.name)}</label>`).join('')}</div></details>
-    <div class="row"><label>יוצא <input type="datetime-local" id="absFrom" value="${dflt(dayStart(now) + 8 * H)}"></label>
-    <label>חוזר <input type="datetime-local" id="absTo" value="${dflt(dayStart(now) + 32 * H)}"></label>
-    <input id="absNote" placeholder="הערה (אופציונלי)"><button class="btn" data-act="addAbs">סמן כיציאה</button></div></div>`;
-  const list = [...S.absences].sort((a, b) => a.from - b.from);
-  const alist = `<div class="panel scroll"><h3>כל היציאות (${list.length})</h3>${list.length ? `<table><tr><th>חייל</th><th>יוצא</th><th>חוזר</th><th>הערה</th><th></th></tr>${list.map(a => {
-    const p = getP(S, a.pid);
-    return `<tr style="${a.to < now ? 'opacity:.5' : ''}"><td>${esc(p ? p.name : '?')}</td>
-      <td><input type="datetime-local" data-f="abs" data-id="${a.id}" data-k="from" value="${toLocalInput(a.from)}"></td>
-      <td><input type="datetime-local" data-f="abs" data-id="${a.id}" data-k="to" value="${toLocalInput(a.to)}"></td>
-      <td><input data-f="abs" data-id="${a.id}" data-k="note" value="${esc(a.note || '')}"></td>
-      <td><button class="btn danger sm" data-act="delAbs" data-id="${a.id}">מחק</button></td></tr>`;
-  }).join('')}</table><p><button class="btn sec sm" data-act="clearOld">נקה יציאות שהסתיימו</button></p>` : '<p class="muted">אין יציאות רשומות — כולם נוכחים.</p>'}</div>`;
-  const rep = `<div class="panel"><h3>דוח נוכחות</h3><div class="row"><select id="repDay">${days.map(d => `<option value="${d}" ${d === ui.pDay ? 'selected' : ''}>${fmtDay(d)}</option>`).join('')}</select>
-    <button class="btn sec" data-act="presReport">הצג דוח</button></div><textarea id="repText" readonly style="margin-top:8px;display:none"></textarea>
-    <div id="repBtns" style="display:none;margin-top:6px"><button class="btn sec sm" data-act="copyText" data-from="repText">העתק</button></div></div>`;
-  return grid + form + alist + rep;
+    }).join('')}</tr>`).join('')}</table><p class="muted">🏠 בבית כל היום · ◐ יציאה חלקית · ✔ בבסיס. לחיצה על משבצת מחליפה יום שלם.</p></div>`;
+  const add = `<div class="panel row noprint"><b>הוספת חייל:</b><input id="newName" placeholder="שם" style="flex:1;min-width:140px"><select id="newRole"><option value="soldier">חייל</option><option value="commander">מפקד</option></select><button class="btn" data-act="addPerson">הוסף</button></div>`;
+  const multi = `<details class="panel noprint"><summary><b>יציאה למספר חיילים בבת אחת</b></summary>
+    <div class="grid2" id="absPick" style="margin:8px 0">${S.soldiers.map(p => `<label><input type="checkbox" value="${p.id}"> ${esc(p.name)}</label>`).join('')}</div>
+    <div class="row"><label>יוצא <input type="datetime-local" id="absFrom" value="${toLocalInput(dayStart(Date.now()) + 8 * H)}"></label>
+    <label>חוזר <input type="datetime-local" id="absTo" value="${toLocalInput(dayStart(Date.now()) + 32 * H)}"></label>
+    <input id="absNote" placeholder="הערה (אופציונלי)"><button class="btn" data-act="addAbs">סמן כיציאה</button></div></details>`;
+  const rep = `<div class="panel noprint"><h3>דוח נוכחות ליום ${fmtDay(day)}</h3><button class="btn sec" data-act="presReport">הצג דוח להעתקה</button>
+    <textarea id="repText" readonly style="margin-top:8px;display:none"></textarea><div id="repBtns" style="display:none;margin-top:6px"><button class="btn sec sm" data-act="copyText" data-from="repText">העתק</button></div></div>`;
+  return `<div class="panel"><h3 style="margin:0 0 6px">נוכחות – ${fmtDay(day)}: ${cnt(day)} מתוך ${S.soldiers.length} בבסיס</h3>${dayChips(days, null, 'pday')}
+    <div class="scroll"><table><tr><th>שם (אפשר לערוך)</th><th></th><th>מצב ביום הנבחר</th><th>פעולות</th></tr>${rows}</table></div></div>${add}${multi}${rep}${grid}`;
+}
+function openAbs(pid) {
+  const p = getP(S, pid), t0 = Math.ceil(Date.now() / (30 * MIN)) * 30 * MIN;
+  const list = S.absences.filter(a => a.pid === pid).sort((x, y) => x.from - y.from);
+  $('#modal').innerHTML = `<div class="overlay" data-act="closeModal"><div class="modal">
+    <h3>יציאה – ${esc(p.name)}</h3>
+    <div class="row" style="margin-bottom:8px">
+      <button class="btn sec sm" data-act="preset" data-v="today">כל היום</button>
+      <button class="btn sec sm" data-act="preset" data-v="tomorrow">מחר כל היום</button>
+      <button class="btn sec sm" data-act="preset" data-v="h4">4 שעות מעכשיו</button>
+      <button class="btn sec sm" data-act="preset" data-v="h8">8 שעות מעכשיו</button>
+      <button class="btn sec sm" data-act="preset" data-v="d3">3 ימים</button></div>
+    <div class="row" style="flex-direction:column;align-items:stretch;gap:8px">
+      <label>יוצא <input type="datetime-local" id="mFrom" value="${toLocalInput(t0)}"></label>
+      <label>חוזר <input type="datetime-local" id="mTo" value="${toLocalInput(t0 + 4 * H)}"></label>
+      <input id="mNote" placeholder="הערה (אופציונלי)"></div>
+    <div class="row" style="margin-top:10px"><button class="btn" data-act="saveAbs" data-p="${pid}">שמור יציאה</button><button class="btn sec" data-act="closeModal">סגור</button></div>
+    ${list.length ? `<h3 style="margin-top:14px">יציאות קיימות</h3>${list.map(a => `<div class="row" style="justify-content:space-between;margin-top:4px"><span>${fmtDT(a.from)} → ${fmtDT(a.to)}${a.note ? ' · ' + esc(a.note) : ''}</span><button class="btn danger sm" data-act="delAbsM" data-id="${a.id}" data-p="${pid}">מחק</button></div>`).join('')}` : ''}
+  </div></div>`;
 }
 const toLocalInput = ms => { const d = new Date(ms); return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`; };
 const toDateInput = ms => toLocalInput(ms).slice(0, 10);
@@ -638,6 +665,25 @@ document.addEventListener('click', async e => {
     case 'tab': ui.tab = d.v; render(); break;
     case 'day': ui.day = +d.v; ui.tab = 'sched'; render(); break;
     case 'goBridge': ui.tab = 'set'; render(); document.getElementById('bridgePanel').scrollIntoView(); break;
+    case 'pday': ui.day = +d.v; render(); break;
+    case 'openAbs': openAbs(d.p); break;
+    case 'preset': {
+      const n = Date.now(), t0 = Math.ceil(n / (30 * MIN)) * 30 * MIN, td = dayStart(n);
+      const m = { today: [td, addDays(td, 1)], tomorrow: [addDays(td, 1), addDays(td, 2)], h4: [t0, t0 + 4 * H], h8: [t0, t0 + 8 * H], d3: [td, addDays(td, 3)] }[d.v];
+      $('#mFrom').value = toLocalInput(m[0]); $('#mTo').value = toLocalInput(m[1]); break;
+    }
+    case 'saveAbs': {
+      const from = new Date($('#mFrom').value).getTime(), to = new Date($('#mTo').value).getTime(), note = $('#mNote').value;
+      if (!(to > from)) return toast('שעת החזרה חייבת להיות אחרי שעת היציאה');
+      $('#modal').innerHTML = '';
+      commit(() => { S.absences.push({ id: uid(), pid: d.p, from, to, note }); normalizeAbsences(S); }, { msg: 'היציאה נשמרה' }); break;
+    }
+    case 'delAbsM': commit(() => { S.absences = S.absences.filter(a => a.id !== d.id); }, { msg: 'היציאה נמחקה' }); openAbs(d.p); break;
+    case 'addPerson': {
+      const name = $('#newName').value.trim(); if (!name) return toast('הכנס שם');
+      const role = $('#newRole').value;
+      commit(() => S.soldiers.push({ id: uid(), name, role, rank: role === 'commander' ? 'primary' : null }), { msg: name + ' נוסף' }); break;
+    }
     case 'view': ui.view = d.v; render(); break;
     case 'undo': undo(); break;
     case 'closeModal': if (e.target === el || el.tagName === 'BUTTON') $('#modal').innerHTML = ''; break;
