@@ -116,12 +116,12 @@ function defaultState() {
   return {
     v: 1, savedAt: 0, soldiers,
     tasks: [
-      { id: 't1', name: 'סיור', needed: 3, needsCommander: true, shiftHours: 4, from: '00:00', to: '00:00', bridgeBlocked: false, restAfter: 8, enabled: true },
-      { id: 't2', name: 'כרמל א', needed: 4, needsCommander: true, shiftHours: 4, from: '00:00', to: '00:00', bridgeBlocked: false, restAfter: 8, enabled: true },
-      { id: 't3', name: 'כרמל ב', needed: 4, needsCommander: true, shiftHours: 4, from: '00:00', to: '00:00', bridgeBlocked: true, restAfter: 8, enabled: true },
-      { id: 't4', name: 'שג', needed: 2, needsCommander: false, shiftHours: 3, from: '00:00', to: '06:00', bridgeBlocked: false, restAfter: 8, enabled: true },
+      { id: 't1', name: 'סיור', needed: 3, needsCommander: true, shiftHours: 8, from: '00:00', to: '00:00', bridgeBlocked: false, restAfter: 8, isPost: false, allowPosts: false, enabled: true },
+      { id: 't2', name: 'כרמל א', needed: 4, needsCommander: true, shiftHours: 8, from: '00:00', to: '00:00', bridgeBlocked: false, restAfter: 0, isPost: false, allowPosts: true, enabled: true },
+      { id: 't3', name: 'כרמל ב', needed: 4, needsCommander: true, shiftHours: 8, from: '00:00', to: '00:00', bridgeBlocked: true, restAfter: 0, isPost: false, allowPosts: true, enabled: true },
+      { id: 't4', name: 'שג', needed: 2, needsCommander: false, shiftHours: 3, from: '00:00', to: '06:00', bridgeBlocked: false, restAfter: 8, isPost: true, allowPosts: false, enabled: true },
     ],
-    bridge: [{ from: '06:30', to: '07:30' }, { from: '17:00', to: '18:00' }],
+    bridge: [{ from: '05:00', to: '07:00' }, { from: '16:00', to: '18:00' }],
     absences: [], assign: {},
     settings: { start: dayStart(Date.now()), days: 7, freezePast: true, autoRepair: true },
   };
@@ -165,6 +165,7 @@ function buildSlots(st) {
 const isNight = s => { const m = new Date((s.s + s.e) / 2).getHours(); return m >= 22 || m < 6; };
 const getP = (st, id) => st.soldiers.find(p => p.id === id);
 const getT = (st, id) => st.tasks.find(t => t.id === id);
+const coexist = (a, b) => (a.allowPosts && b.isPost) || (b.allowPosts && a.isPost);
 const restOf = t => (t && t.restAfter != null ? t.restAfter : 8);
 
 function makeBusy() {
@@ -187,8 +188,12 @@ function whyNot(st, pid, slot, busy, role) {
   for (const b of busy[pid] || []) {
     if (b.key === slot.key) continue;
     const bt = getT(st, b.key.split('|')[0]);
-    if (b.s < slot.e && slot.s < b.e) return 'משובץ ב' + (bt ? bt.name : '?') + ' ' + fmtT(b.s) + '–' + fmtT(b.e);
-    const before = b.e <= slot.s, src = before ? bt : myTask, need = restOf(src);
+    if (b.s < slot.e && slot.s < b.e) {
+      if (bt && myTask && coexist(bt, myTask)) continue;
+      return 'משובץ ב' + (bt ? bt.name : '?') + ' ' + fmtT(b.s) + '–' + fmtT(b.e);
+    }
+    const before = b.e <= slot.s, src = before ? bt : myTask, dst = before ? myTask : bt, need = restOf(src);
+    if (src && dst && src.isPost && dst.allowPosts) continue; // posts are done under the standby (כרמל) umbrella
     const gap = before ? slot.s - b.e : b.s - slot.e;
     if (gap < need * H) return 'פחות מ-' + need + ' שעות מנוחה אחרי ' + (src ? src.name : '?');
   }
@@ -205,8 +210,8 @@ function autoAssign(st, opts) {
     if (!a || s.blocked) continue;
     if (a.locked || frozen(s) || mode === 'repair') A[s.key] = { ids: [...a.ids], cmd: a.cmd || null, locked: !!a.locked };
   }
-  const busy = makeBusy(), load = {}, nights = {};
-  const count = (pid, s) => { load[pid] = (load[pid] || 0) + (s.e - s.s) / H; if (isNight(s)) nights[pid] = (nights[pid] || 0) + 1; };
+  const busy = makeBusy(), load = {}, nights = {}, typeCnt = {};
+  const count = (pid, s) => { load[pid] = (load[pid] || 0) + (s.e - s.s) / H; (typeCnt[pid] = typeCnt[pid] || {})[s.taskId] = ((typeCnt[pid] || {})[s.taskId] || 0) + 1; if (isNight(s)) nights[pid] = (nights[pid] || 0) + 1; };
   // fixed slots (locked / past) seed the busy map first
   for (const s of slots) {
     const a = A[s.key];
@@ -236,18 +241,26 @@ function autoAssign(st, opts) {
     if (mC) slack = Math.min(slack, cmds.filter(p => !whyNot(st, p.id, s, busy, 'cmd')).length - mC);
     return slack;
   };
-  const queue = open.map(s => ({ s, slack: slackOf(s) })).sort((x, y) => x.slack - y.slack || x.s.s - y.s.s);
+  const byTask = s => getT(st, s.taskId);
+  const queue = open.map(s => ({ s, slack: slackOf(s) })).sort((x, y) => (byTask(x.s).isPost - byTask(y.s).isPost) || x.slack - y.slack || x.s.s - y.s.s);
+  const inStandby = (pid, s) => (busy[pid] || []).some(b => b.s < s.e && s.s < b.e && (getT(st, b.key.split('|')[0]) || {}).allowPosts);
   const score = (pid, s) => {
     let sc = (load[pid] || 0) + (isNight(s) ? (nights[pid] || 0) * 2 : 0);
-    let gap = 24 * H;
-    for (const b of busy[pid] || []) gap = Math.min(gap, b.e <= s.s ? s.s - b.e : b.s - s.e);
+    sc += ((typeCnt[pid] || {})[s.taskId] || 0) * 5; // variety: spread each task type across people
+    let gap = 24 * H, prev = null;
+    for (const b of busy[pid] || []) {
+      gap = Math.min(gap, b.e <= s.s ? s.s - b.e : b.s - s.e);
+      if (b.e === s.s) prev = getT(st, b.key.split('|')[0]);
+    }
+    if (prev && prev.allowPosts) sc += prev.id === s.taskId ? 6 : -3; // after a standby block: prefer switching to a different task
     return sc - gap / H * 0.05 + (hashStr(pid + s.key) % 100) / 1000;
   };
   for (const { s } of queue) {
     const t = getT(st, s.taskId), a = A[s.key];
     const mS = t.needed - a.ids.length;
     if (mS > 0) {
-      const c = soldiers.filter(p => !a.ids.includes(p.id) && !whyNot(st, p.id, s, busy, 'soldier')).sort((x, y) => score(x.id, s) - score(y.id, s));
+      const post = byTask(s).isPost, umb = id => (post && inStandby(id, s) ? 0 : 1);
+      const c = soldiers.filter(p => !a.ids.includes(p.id) && !whyNot(st, p.id, s, busy, 'soldier')).sort((x, y) => umb(x.id) - umb(y.id) || score(x.id, s) - score(y.id, s));
       c.slice(0, mS).forEach(p => { a.ids.push(p.id); busy.add(p.id, s.s, s.e, s.key); count(p.id, s); });
     }
     if (t.needsCommander && !a.cmd) {
@@ -335,7 +348,8 @@ function personStats(st) {
 function capacity(st, now) {
   const slots = buildSlots(st).filter(s => !s.blocked && !(st.settings.freezePast && s.e <= now));
   let needS = 0, needC = 0, avgShift = 0, n = 0;
-  slots.forEach(s => { const t = getT(st, s.taskId), h = (s.e - s.s) / H; needS += t.needed * h; if (t.needsCommander) needC += h; avgShift += h; n++; });
+  const nested = st.tasks.some(t => t.enabled && t.allowPosts);
+  slots.forEach(s => { const t = getT(st, s.taskId), h = (s.e - s.s) / H; if (!(nested && t.isPost)) needS += t.needed * h; if (t.needsCommander) needC += h; avgShift += h; n++; });
   avgShift = n ? avgShift / n : 4;
   const from = st.settings.freezePast ? Math.max(now, st.settings.start) : st.settings.start, to = addDays(st.settings.start, st.settings.days);
   let availS = 0, availC = 0;
@@ -536,16 +550,19 @@ function renderSet() {
       <td><button class="btn danger sm" data-act="delSoldier" data-id="${p.id}">מחק</button></td></tr>`).join('')}</table>
     <h3 style="margin-top:12px">הוספה מהירה (שם בכל שורה)</h3><textarea id="bulk" placeholder="דני כהן&#10;רון לוי"></textarea>
     <div class="row" style="margin-top:6px"><select id="bulkRole"><option value="soldier">חיילים</option><option value="commander">מפקדים</option></select><button class="btn" data-act="bulkAdd">הוסף</button></div></div>`;
-  const tasks = `<div class="panel scroll"><h3>משימות</h3><table><tr><th>שם</th><th>פעילה</th><th>חיילים</th><th>מפקד</th><th>אורך משמרת (ש׳)</th><th>מנוחה אחרי (ש׳)</th><th>מ-</th><th>עד</th><th>אסורה בגשר</th><th></th></tr>
+  const tasks = `<div class="panel scroll"><h3>משימות</h3><table><tr><th>שם</th><th>פעילה</th><th>חיילים</th><th>מפקד</th><th>אורך משמרת (ש׳)</th><th>מנוחה אחרי (ש׳)</th><th>עמדה</th><th>מאפשר עמדות</th><th>מ-</th><th>עד</th><th>אסורה בגשר</th><th></th></tr>
     ${S.tasks.map(t => `<tr><td>${f('task', t.id, 'name', t.name)}</td>
       <td><input type="checkbox" data-f="task" data-id="${t.id}" data-k="enabled" ${t.enabled ? 'checked' : ''}></td>
       <td>${f('task', t.id, 'needed', t.needed, 'number', 'min="1" max="30"')}</td>
       <td><input type="checkbox" data-f="task" data-id="${t.id}" data-k="needsCommander" ${t.needsCommander ? 'checked' : ''}></td>
       <td>${f('task', t.id, 'shiftHours', t.shiftHours, 'number', 'min="0.5" max="24" step="0.5"')}</td>
       <td>${f('task', t.id, 'restAfter', restOf(t), 'number', 'min="0" max="48" step="0.5"')}</td>
+      <td><input type="checkbox" data-f="task" data-id="${t.id}" data-k="isPost" ${t.isPost ? 'checked' : ''}></td>
+      <td><input type="checkbox" data-f="task" data-id="${t.id}" data-k="allowPosts" ${t.allowPosts ? 'checked' : ''}></td>
       <td>${f('task', t.id, 'from', t.from, 'time')}</td><td>${f('task', t.id, 'to', t.to, 'time')}</td>
       <td><input type="checkbox" data-f="task" data-id="${t.id}" data-k="bridgeBlocked" ${t.bridgeBlocked ? 'checked' : ''}></td>
       <td><button class="btn danger sm" data-act="delTask" data-id="${t.id}">מחק</button></td></tr>`).join('')}</table>
+    <p class="muted"><b>עמדה</b> = משימה שאפשר לבצע בזמן כוננות. <b>מאפשר עמדות</b> = חיילים במשימה הזו (למשל כרמל) יכולים לעלות לעמדות באמצע, בלי התנגשות ובלי מנוחה ביניהן. עמדות מאוישות קודם מחיילים שנמצאים בכרמל באותה שעה.</p>
     <p class="muted">שעות זהות ב"מ-" וב"עד" (למשל 00:00–00:00) = פעילה 24 שעות. אם "עד" מוקדם מ"מ-" המשימה נמשכת אחרי חצות.</p>
     <button class="btn" data-act="addTask">+ משימה חדשה</button></div>`;
   const br = `<div class="panel" id="bridgePanel"><h3>זמני גשר (כל יום)</h3><p class="muted">משימה המסומנת "אסורה בגשר" לא תקבל משמרת שחופפת לשעות האלה.</p>
@@ -716,7 +733,7 @@ document.addEventListener('click', async e => {
       if (!names.length) return;
       commit(() => names.forEach(name => S.soldiers.push({ id: uid(), name, role, rank: role === 'commander' ? 'primary' : null })), { msg: names.length + ' נוספו' }); break;
     }
-    case 'addTask': commit(() => S.tasks.push({ id: uid(), name: 'משימה חדשה', needed: 2, needsCommander: false, shiftHours: 4, from: '00:00', to: '00:00', bridgeBlocked: false, restAfter: 8, enabled: true })); break;
+    case 'addTask': commit(() => S.tasks.push({ id: uid(), name: 'משימה חדשה', needed: 2, needsCommander: false, shiftHours: 4, from: '00:00', to: '00:00', bridgeBlocked: false, restAfter: 8, isPost: false, allowPosts: false, enabled: true })); break;
     case 'delTask': if (await ask('למחוק את המשימה "' + getT(S, d.id).name + '"?', 'מחק')) commit(() => { S.tasks = S.tasks.filter(t => t.id !== d.id); }); break;
     case 'addBridge': commit(() => S.bridge.push({ from: '12:00', to: '13:00' })); break;
     case 'delBridge': commit(() => S.bridge.splice(+d.id, 1)); break;
@@ -767,6 +784,7 @@ document.addEventListener('keydown', e => { if (e.key === 'Escape') $('#modal').
   S = loadState();
   const fresh = !S;
   if (!S) S = defaultState();
+  S.tasks.forEach(t => { if (t.isPost === undefined) { t.isPost = t.name === 'שג'; t.allowPosts = /^כרמל/.test(t.name); } });
   S = Object.assign(defaultState(), S); S.settings = Object.assign(defaultState().settings, S.settings);
   if (addDays(S.settings.start, S.settings.days) <= Date.now()) { S.settings.start = dayStart(Date.now()); S.assign = {}; runAuto('full'); save(); }
   if (fresh) { runAuto('full'); save(); }
