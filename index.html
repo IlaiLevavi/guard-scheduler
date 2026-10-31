@@ -25,6 +25,9 @@ header button{background:rgba(255,255,255,.18);color:inherit;border:0;border-rad
 header button:disabled{opacity:.4;cursor:default}
 .status{font-size:13px;padding:3px 10px;border-radius:99px;background:rgba(255,255,255,.2)}
 .status.bad{background:var(--bad);color:#fff}
+.sync{font-size:13px;padding:3px 10px;border-radius:99px;background:rgba(255,255,255,.2)}
+.sync.err{background:#b7791f;color:#fff}
+.linkbox{width:100%;direction:ltr;font-size:14px}
 nav{display:flex;gap:4px;padding:8px 16px 0;overflow-x:auto;border-bottom:1px solid var(--line);background:var(--panel)}
 nav button{border:0;background:none;padding:9px 14px;cursor:pointer;font:inherit;color:var(--muted);border-bottom:3px solid transparent;white-space:nowrap}
 nav button.on{color:var(--ink);border-bottom-color:var(--accent);font-weight:600}
@@ -455,7 +458,73 @@ function loadState() {
   cand.sort((a, b) => (b.savedAt || 0) - (a.savedAt || 0));
   return cand[0] || null;
 }
-function save() { S.savedAt = Date.now(); try { localStorage.setItem(KEY, JSON.stringify(S)); } catch (_) {} }
+function localSave() { try { localStorage.setItem(KEY, JSON.stringify(S)); } catch (_) {} }
+function save() { S.savedAt = Date.now(); localSave(); if (sync.id) queuePush(); }
+
+// ---------- shared link (one fixed link, everyone sees the same schedule) ----------
+const API = 'https://guard-scheduler-api.ilailevavi.workers.dev';
+const SID_KEY = 'guard-scheduler-sid';
+const sync = { id: null, ver: 0, st: 'off', dirty: false, busy: false, timer: null };
+const shareUrl = () => location.origin + location.pathname + '#s=' + sync.id;
+function setSync(st) { sync.st = st; const el = $('#syncChip'); if (el) el.outerHTML = syncChip(); }
+function syncChip() {
+  if (!sync.id) return '<span id="syncChip"></span>';
+  const t = { ok: '☁ מסונכרן', saving: '⏳ שומר…', err: '⚠ אין חיבור – יישמר כשיחזור' }[sync.st] || '';
+  return `<span id="syncChip" class="sync ${sync.st === 'err' ? 'err' : ''}">${t}</span>`;
+}
+async function api(method, path, body) {
+  const r = await fetch(API + path, { method, cache: 'no-store', headers: body ? { 'Content-Type': 'application/json' } : {}, body: body ? JSON.stringify(body) : undefined });
+  return { status: r.status, j: await r.json().catch(() => ({})) };
+}
+function adoptRemote(j, msg) {
+  S = migrate(Object.assign(defaultState(), j.data)); S.settings = Object.assign(defaultState().settings, S.settings);
+  sync.ver = j.ver; undoStack = []; localSave(); render(); if (msg) toast(msg);
+}
+function queuePush() { sync.dirty = true; setSync('saving'); clearTimeout(sync.timer); sync.timer = setTimeout(pushNow, 500); }
+async function pushNow() {
+  if (!sync.id || sync.busy || !sync.dirty) return;
+  sync.busy = true; sync.dirty = false;
+  let ok = false;
+  try {
+    const { status, j } = await api('PUT', '/s/' + sync.id, { ver: sync.ver, data: S });
+    if (status === 200) { sync.ver = j.ver; ok = true; }
+    else if (status === 409) { adoptRemote(j, 'מישהו אחר עדכן את הסידור בינתיים – נטען הסידור העדכני. בצע שוב את השינוי שלך.'); ok = true; }
+    else sync.dirty = true;
+  } catch (_) { sync.dirty = true; }
+  sync.busy = false;
+  if (!ok) return setSync('err');
+  if (sync.dirty) pushNow(); else setSync('ok');
+}
+async function poll() {
+  if (!sync.id || sync.busy || document.hidden) return;
+  if (sync.dirty) return pushNow(); // retry an unsent change
+  try {
+    const { status, j } = await api('GET', '/s/' + sync.id);
+    if (status === 200) { if (j.ver > sync.ver && !sync.dirty && !sync.busy) adoptRemote(j, 'הסידור עודכן'); setSync('ok'); }
+  } catch (_) { setSync('err'); }
+}
+async function connect(id) {
+  try {
+    const { status, j } = await api('GET', '/s/' + id);
+    if (status === 404) { toast('הלינק הקבוע לא נמצא'); return false; }
+    if (status !== 200) throw 0;
+    sync.id = id; adoptRemote(j); setSync('ok');
+  } catch (_) { sync.id = id; setSync('err'); toast('אין חיבור – מוצג הסידור השמור במכשיר'); }
+  try { localStorage.setItem(SID_KEY, id); } catch (_) {}
+  if (location.hash !== '#s=' + id) history.replaceState(null, '', '#s=' + id);
+  return true;
+}
+async function createShared() {
+  try {
+    const { status, j } = await api('POST', '/s', { data: S });
+    if (status !== 200) throw 0;
+    sync.id = j.id; sync.ver = j.ver;
+    try { localStorage.setItem(SID_KEY, j.id); } catch (_) {}
+    history.replaceState(null, '', '#s=' + j.id); setSync('ok'); render(); toast('נוצר לינק קבוע');
+  } catch (_) { toast('לא הצלחתי ליצור לינק – בדוק חיבור לאינטרנט'); }
+}
+setInterval(poll, 15000);
+document.addEventListener('visibilitychange', () => { if (!document.hidden) poll(); });
 function runAuto(mode) { const r = autoAssign(S, { mode, now: Date.now() }); S.assign = r.assign; return r.changed; }
 function commit(fn, o) {
   o = o || {};
@@ -482,7 +551,7 @@ function render() {
   const y = window.scrollY, now = Date.now(), issues = validate(S, now);
   const body = { sched: renderSched, pres: renderPres, set: renderSet, stats: renderStats, share: renderShare }[ui.tab](issues);
   $('#app').innerHTML = `<header><h1>🛡️ שיבוץ שמירות</h1>
-    <span class="status ${issues.length ? 'bad' : ''}">${issues.length ? issues.length + ' בעיות' : 'הכול תקין'}</span>
+    ${syncChip()}<span class="status ${issues.length ? 'bad' : ''}">${issues.length ? issues.length + ' בעיות' : 'הכול תקין'}</span>
     <button data-act="undo" ${undoStack.length ? '' : 'disabled'}>↩ בטל</button></header>
     <nav>${TABS.map(([k, l]) => `<button class="${ui.tab === k ? 'on' : ''}" data-act="tab" data-v="${k}">${l}</button>`).join('')}</nav>
     <main>${body}</main>`;
@@ -691,7 +760,13 @@ function renderStats() {
 function renderShare() {
   const days = dayList(); pickDay(days);
   const http = /^https?:/.test(location.protocol);
-  return `<div class="panel"><h3>שליחה למפקד</h3>
+  const fixed = sync.id ? `<div class="panel" style="border-color:var(--accent)"><h3>🔗 לינק קבוע</h3>
+    <p class="muted" style="margin-top:0">כל מי שיש לו את הלינק הזה רואה ועורך את אותו סידור, והשינויים מופיעים אצל כולם לבד. אין צורך לשלוח שוב אחרי כל שינוי. הלינק נותן גישה רק לסידור הזה.</p>
+    <input class="linkbox" readonly value="${esc(shareUrl())}" onclick="this.select()">
+    <div class="row" style="margin-top:6px"><button class="btn" data-act="copyFixed">העתק לינק</button><button class="btn sec" data-act="waFixed">שלח בוואטסאפ</button></div></div>`
+    : `<div class="panel" style="border-color:var(--accent)"><h3>🔗 לינק קבוע</h3><p class="muted" style="margin-top:0">יוצר לינק קצר אחד שכולם פותחים ורואים את אותו סידור מעודכן – בלי לשלוח מחדש אחרי כל שינוי.</p>
+    <button class="btn" data-act="mkShared">צור לינק קבוע</button></div>`;
+  return fixed + `<div class="panel"><h3>שליחה למפקד</h3>
     <p class="muted">הכי פשוט: הורד קובץ מעודכן (כולל כל הנתונים) ושלח אותו בוואטסאפ. המפקד פותח את הקובץ בדפדפן, ממלא נוכחות, ושולח לך בחזרה קוד נתונים או את הקובץ.</p>
     <div class="row"><button class="btn" data-act="dlHtml">⬇ הורד קובץ אתר עם הנתונים</button><button class="btn sec" data-act="dlJson">⬇ קובץ נתונים (JSON)</button></div></div>
   <div class="panel"><h3>קוד נתונים (להדבקה בוואטסאפ)</h3>
@@ -854,6 +929,9 @@ document.addEventListener('click', async e => {
     }
     case 'dlJson': download('שמירות-נתונים.json', JSON.stringify(S), 'application/json'); break;
     case 'copyCode': copy(await encodeState()); break;
+    case 'mkShared': createShared(); break;
+    case 'copyFixed': copy(shareUrl()); break;
+    case 'waFixed': window.open('https://wa.me/?text=' + encodeURIComponent('סידור שמירות (מתעדכן לבד):\n' + shareUrl()), '_blank'); break;
     case 'copyLink': copy(location.href.split('#')[0] + '#d=' + await encodeState()); break;
     case 'importCode':
       try { const st = await decodeState($('#codeIn').value); if (await ask('הנתונים הנוכחיים יוחלפו בנתונים מהקוד. להמשיך?', 'ייבא')) replaceState(st, 'הנתונים יובאו'); }
@@ -898,6 +976,11 @@ document.addEventListener('keydown', e => { if (e.key === 'Escape') $('#modal').
   // note: an ended range is NOT wiped any more – the schedule tab offers "+ הוסף יום" instead
   if (fresh) { runAuto('full'); save(); }
   render();
+  // fixed shared link: #s=<id> (or the last one this device used)
+  const sm = location.hash.match(/#s=([a-z0-9]{6,32})/);
+  let sid = sm ? sm[1] : null;
+  if (!sid && !/#d=/.test(location.hash)) { try { sid = localStorage.getItem(SID_KEY); } catch (_) {} }
+  if (sid) { await connect(sid); return; }
   const m = location.hash.match(/#d=(.+)/);
   if (m) {
     try { const st = await decodeState(m[1]); window.history.replaceState(null, '', location.pathname + location.search); if (await ask('נמצאו נתונים בקישור. להחליף את הנתונים המקומיים?', 'טען')) replaceState(st, 'נטען מהקישור'); }

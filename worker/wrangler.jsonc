@@ -1,0 +1,8 @@
+{
+  "name": "guard-scheduler-api",
+  "main": "worker.js",
+  "compatibility_date": "2026-10-01",
+  "d1_databases": [
+    { "binding": "DB", "database_name": "guard-scheduler-db", "database_id": "cc65d491-82c1-4a11-b233-ec46a88a40d9" }
+  ]
+}
