@@ -59,6 +59,7 @@ textarea{width:100%;min-height:90px}
 .person.cmd{background:var(--cmd-bg);color:var(--cmd);font-weight:600}
 .person.empty{background:none;border:1px dashed var(--bad);color:var(--bad)}
 .person.bad{border-color:var(--bad);color:var(--bad)}
+.person.ext{background:var(--warn-bg);font-style:italic}
 .issues li{margin:3px 0}
 .issues a{color:var(--bad);cursor:pointer;text-decoration:underline}
 table{border-collapse:collapse;width:100%}
@@ -116,16 +117,29 @@ function defaultState() {
   return {
     v: 1, savedAt: 0, soldiers,
     tasks: [
-      { id: 't1', name: 'סיור', needed: 3, needsCommander: true, shiftHours: 8, from: '00:00', to: '00:00', bridgeBlocked: false, restAfter: 8, isPost: false, allowPosts: false, enabled: true },
-      { id: 't2', name: 'כרמל א', needed: 4, needsCommander: true, shiftHours: 8, from: '00:00', to: '00:00', bridgeBlocked: false, restAfter: 0, isPost: false, allowPosts: true, enabled: true },
-      { id: 't3', name: 'כרמל ב', needed: 4, needsCommander: true, shiftHours: 8, from: '00:00', to: '00:00', bridgeBlocked: true, restAfter: 0, isPost: false, allowPosts: true, enabled: true },
-      { id: 't4', name: 'שג', needed: 2, needsCommander: false, shiftHours: 3, from: '00:00', to: '06:00', bridgeBlocked: false, restAfter: 8, isPost: true, allowPosts: false, enabled: true },
+      { id: 't1', name: 'סיור', needed: 2, needsCommander: true, shiftHours: 8, from: '00:00', to: '00:00', bridgeBlocked: false, restAfter: 8, isPost: false, allowPosts: false, weight: 1, enabled: true },
+      { id: 't2', name: 'כרמל א', needed: 3, needsCommander: true, shiftHours: 8, from: '00:00', to: '00:00', bridgeBlocked: false, restAfter: 0, isPost: false, allowPosts: true, weight: 0.25, enabled: true },
+      { id: 't3', name: 'כרמל ב', needed: 3, needsCommander: true, shiftHours: 8, from: '00:00', to: '00:00', bridgeBlocked: false, restAfter: 0, isPost: false, allowPosts: true, weight: 0.4, enabled: true },
+      { id: 't4', name: 'שג', needed: 1, needsCommander: false, shiftHours: 2, from: '00:00', to: '00:00', bridgeBlocked: false, restAfter: 4, isPost: true, allowPosts: false, weight: 1, enabled: true },
+      { id: 't5', name: 'צפוני', needed: 1, needsCommander: false, shiftHours: 2, from: '00:00', to: '06:00', bridgeBlocked: false, restAfter: 4, isPost: true, allowPosts: false, weight: 1, enabled: true },
     ],
     bridge: [{ from: '05:00', to: '07:00' }, { from: '16:00', to: '18:00' }],
-    absences: [], assign: {},
+    absences: [], assign: {}, home: [],
     settings: { start: dayStart(Date.now()), days: 7, freezePast: true, autoRepair: true },
   };
 }
+// fill in fields added in later versions (old links / saved data)
+function migrate(st) {
+  st.home = st.home || [];
+  st.tasks.forEach(t => {
+    if (t.isPost === undefined) { t.isPost = t.name === 'שג'; t.allowPosts = /^כרמל/.test(t.name); }
+    if (t.weight == null) t.weight = t.allowPosts ? 0.25 : 1;
+  });
+  return st;
+}
+const weightOf = t => (t && t.weight != null ? +t.weight : 1);
+// whole-unit home leave: [{from, to|null}] (to = null → not back yet)
+const homeAt = (st, s, e) => (st.home || []).filter(h => h.from < e && (h.to == null || s < h.to));
 
 function bridgeIntervals(st) {
   const out = [], { start, days } = st.settings;
@@ -149,11 +163,19 @@ function buildSlots(st) {
       const s0 = atHM(d, t.from); let e0 = atHM(d, t.to);
       if (e0 <= s0) e0 = atHM(addDays(d, 1), t.to);
       const len = Math.max(0.25, t.shiftHours) * H;
-      for (let s = s0; s < e0;) {
-        const e = Math.min(s + len, e0);
-        const blocked = t.bridgeBlocked && bridges.some(b => s < b.e && b.s < e);
-        slots.push({ key: t.id + '|' + s, taskId: t.id, s, e, blocked, day: dayStart(s) });
-        s = e;
+      for (let s1 = s0; s1 < e0;) {
+        const e1 = Math.min(s1 + len, e0);
+        let s = s1, e = e1;
+        // cut the shift around a home-leave period (drop it if fully at home)
+        for (const h of homeAt(st, s, e)) {
+          if (h.from <= s) s = h.to == null ? e : Math.max(s, h.to);
+          else e = Math.min(e, h.from);
+        }
+        if (e - s >= 15 * MIN) {
+          const blocked = t.bridgeBlocked && bridges.some(b => s < b.e && b.s < e);
+          slots.push({ key: t.id + '|' + s, taskId: t.id, s, e, blocked, day: dayStart(s) });
+        }
+        s1 = e1;
       }
     }
   }
@@ -170,35 +192,40 @@ const restOf = t => (t && t.restAfter != null ? t.restAfter : 8);
 
 function makeBusy() {
   const b = {};
-  b.add = (pid, s, e, key) => { (b[pid] = b[pid] || []).push({ s, e, key }); };
+  Object.defineProperty(b, 'add', { value: (pid, s, e, key) => { (b[pid] = b[pid] || []).push({ s, e, key }); } });
+  Object.defineProperty(b, 'del', { value: (pid, key) => { if (b[pid]) b[pid] = b[pid].filter(x => x.key !== key); } });
   return b;
 }
 function slotMap(st, slots) { const m = {}; slots.forEach(s => m[s.key] = s); return m; }
 
-// why can't `pid` take this slot (null = fine)
-function whyNot(st, pid, slot, busy, role) {
-  const p = getP(st, pid);
-  if (!p) return 'לא קיים';
-  if (role === 'cmd' && p.role !== 'commander') return 'לא מפקד';
-  if (role === 'soldier' && p.role !== 'soldier') return 'מפקד';
-  for (const a of st.absences) {
-    if (a.pid === pid && a.from < slot.e && slot.s < a.to) return 'מחוץ לבסיס עד ' + fmtDT(a.to);
-  }
+// every reason `pid` can't take this slot: [{msg, key (other slot or null), kind}]
+function conflicts(st, pid, slot, busy, role, first) {
+  const p = getP(st, pid), out = [];
+  if (!p) return [{ msg: 'לא קיים', key: null, kind: 'role' }];
   const myTask = getT(st, slot.taskId);
+  if (role === 'cmd' && p.role !== 'commander') return [{ msg: 'לא מפקד', key: null, kind: 'role' }];
+  // commanders may also stand in posts (ש״ג / צפוני), not in soldier seats of other tasks
+  if (role === 'soldier' && p.role !== 'soldier' && !(myTask && myTask.isPost)) return [{ msg: 'מפקד', key: null, kind: 'role' }];
+  for (const a of st.absences) {
+    if (a.pid === pid && a.from < slot.e && slot.s < a.to) { out.push({ msg: 'מחוץ לבסיס עד ' + fmtDT(a.to), key: null, kind: 'away' }); if (first) return out; }
+  }
   for (const b of busy[pid] || []) {
     if (b.key === slot.key) continue;
     const bt = getT(st, b.key.split('|')[0]);
     if (b.s < slot.e && slot.s < b.e) {
       if (bt && myTask && coexist(bt, myTask)) continue;
-      return 'משובץ ב' + (bt ? bt.name : '?') + ' ' + fmtT(b.s) + '–' + fmtT(b.e);
+      out.push({ msg: 'משובץ ב' + (bt ? bt.name : '?') + ' ' + fmtT(b.s) + '–' + fmtT(b.e), key: b.key, kind: 'overlap' });
+      if (first) return out; continue;
     }
     const before = b.e <= slot.s, src = before ? bt : myTask, dst = before ? myTask : bt, need = restOf(src);
     if (src && dst && src.isPost && dst.allowPosts) continue; // posts are done under the standby (כרמל) umbrella
     const gap = before ? slot.s - b.e : b.s - slot.e;
-    if (gap < need * H) return 'פחות מ-' + need + ' שעות מנוחה אחרי ' + (src ? src.name : '?');
+    if (gap < need * H) { out.push({ msg: 'פחות מ-' + need + ' שעות מנוחה אחרי ' + (src ? src.name : '?'), key: b.key, kind: 'rest' }); if (first) return out; }
   }
-  return null;
+  return out;
 }
+// why can't `pid` take this slot (null = fine)
+function whyNot(st, pid, slot, busy, role) { const c = conflicts(st, pid, slot, busy, role, true); return c.length ? c[0].msg : null; }
 
 function autoAssign(st, opts) {
   const now = opts.now != null ? opts.now : Date.now(), mode = opts.mode || 'repair';
@@ -208,19 +235,26 @@ function autoAssign(st, opts) {
   for (const s of slots) {
     const a = st.assign[s.key];
     if (!a || s.blocked) continue;
-    if (a.locked || frozen(s) || mode === 'repair') A[s.key] = { ids: [...a.ids], cmd: a.cmd || null, locked: !!a.locked };
+    if (a.locked || a.ext || frozen(s) || mode === 'repair') A[s.key] = { ids: [...a.ids], cmd: a.cmd || null, locked: !!a.locked, ...(a.ext ? { ext: a.ext } : {}) };
   }
+  const fixed = s => { const a = A[s.key]; return !!(a && (a.locked || a.ext)) || frozen(s); };
+  // fairness counts "hard hours": hours × task weight (סיור/עמדות = 1, כרמל ≈ rest)
   const busy = makeBusy(), load = {}, nights = {}, typeCnt = {};
-  const count = (pid, s) => { load[pid] = (load[pid] || 0) + (s.e - s.s) / H; (typeCnt[pid] = typeCnt[pid] || {})[s.taskId] = ((typeCnt[pid] || {})[s.taskId] || 0) + 1; if (isNight(s)) nights[pid] = (nights[pid] || 0) + 1; };
+  const count = (pid, s, sign) => {
+    const t = getT(st, s.taskId), w = weightOf(t), k = sign || 1;
+    load[pid] = (load[pid] || 0) + k * (s.e - s.s) / H * w;
+    const tc = (typeCnt[pid] = typeCnt[pid] || {}); tc[s.taskId] = (tc[s.taskId] || 0) + k;
+    if (isNight(s) && w >= 0.5) nights[pid] = (nights[pid] || 0) + k;
+  };
   // fixed slots (locked / past) seed the busy map first
   for (const s of slots) {
     const a = A[s.key];
-    if (a && (a.locked || frozen(s))) [...a.ids, a.cmd].filter(Boolean).forEach(pid => { busy.add(pid, s.s, s.e, s.key); count(pid, s); });
+    if (a && fixed(s)) [...a.ids, a.cmd].filter(Boolean).forEach(pid => { busy.add(pid, s.s, s.e, s.key); count(pid, s); });
   }
   // sanitize the rest chronologically: keep whoever is still valid
   for (const s of slots) {
     const a = A[s.key];
-    if (!a || a.locked || frozen(s)) continue;
+    if (!a || fixed(s)) continue;
     const t = getT(st, s.taskId), keep = [];
     for (const id of a.ids) {
       if (keep.length >= t.needed || keep.includes(id)) continue;
@@ -231,13 +265,14 @@ function autoAssign(st, opts) {
     if (a.cmd) { busy.add(a.cmd, s.s, s.e, s.key); count(a.cmd, s); }
   }
   // fill gaps, most constrained slot first
-  const open = slots.filter(s => !s.blocked && !frozen(s) && !(A[s.key] && A[s.key].locked));
+  const open = slots.filter(s => !s.blocked && !fixed(s));
   open.forEach(s => { if (!A[s.key]) A[s.key] = { ids: [], cmd: null, locked: false }; });
   const soldiers = st.soldiers.filter(p => p.role === 'soldier'), cmds = st.soldiers.filter(p => p.role === 'commander');
+  const pool = (t, role) => role === 'cmd' ? cmds : t.isPost ? soldiers.concat(cmds) : soldiers;
   const slackOf = s => {
     const t = getT(st, s.taskId), a = A[s.key], mS = t.needed - a.ids.length, mC = t.needsCommander && !a.cmd ? 1 : 0;
     let slack = Infinity;
-    if (mS > 0) slack = Math.min(slack, soldiers.filter(p => !whyNot(st, p.id, s, busy, 'soldier')).length - mS);
+    if (mS > 0) slack = Math.min(slack, pool(t, 'soldier').filter(p => !whyNot(st, p.id, s, busy, 'soldier')).length - mS);
     if (mC) slack = Math.min(slack, cmds.filter(p => !whyNot(st, p.id, s, busy, 'cmd')).length - mC);
     return slack;
   };
@@ -245,29 +280,62 @@ function autoAssign(st, opts) {
   const queue = open.map(s => ({ s, slack: slackOf(s) })).sort((x, y) => (byTask(x.s).isPost - byTask(y.s).isPost) || x.slack - y.slack || x.s.s - y.s.s);
   const inStandby = (pid, s) => (busy[pid] || []).some(b => b.s < s.e && s.s < b.e && (getT(st, b.key.split('|')[0]) || {}).allowPosts);
   const score = (pid, s) => {
-    let sc = (load[pid] || 0) + (isNight(s) ? (nights[pid] || 0) * 2 : 0);
-    sc += ((typeCnt[pid] || {})[s.taskId] || 0) * 5; // variety: spread each task type across people
-    let gap = 24 * H, prev = null;
-    for (const b of busy[pid] || []) {
-      gap = Math.min(gap, b.e <= s.s ? s.s - b.e : b.s - s.e);
-      if (b.e === s.s) prev = getT(st, b.key.split('|')[0]);
+    const t = getT(st, s.taskId), w = weightOf(t), hard = w >= 0.5;
+    let sc = (load[pid] || 0) + (isNight(s) && hard ? (nights[pid] || 0) * 3 : 0);
+    sc += ((typeCnt[pid] || {})[s.taskId] || 0) * (s.e - s.s) / H * w * 0.5; // variety: spread each task type across people
+    if (hard) { // the longer the break since your last hard task (סיור / עמדה), the better
+      let gap = 24 * H;
+      for (const b of busy[pid] || []) if (weightOf(getT(st, b.key.split('|')[0])) >= 0.5) gap = Math.min(gap, b.e <= s.s ? s.s - b.e : b.s - s.e);
+      const gh = Math.max(0, gap) / H;
+      sc -= gh * 0.3;
+      if (gh < 16) sc += (16 - gh) * 0.8; // avoid hard task after only the minimum rest
     }
-    if (prev && prev.allowPosts) sc += prev.id === s.taskId ? 6 : -3; // after a standby block: prefer switching to a different task
-    return sc - gap / H * 0.05 + (hashStr(pid + s.key) % 100) / 1000;
+    if (t.isPost) {
+      if (inStandby(pid, s)) sc -= 3; // already sitting in כרמל → natural to go up to the post
+      if ((getP(st, pid) || {}).role === 'commander') sc += 3; // commanders to posts only when it helps
+    }
+    return sc + (hashStr(pid + s.key) % 100) / 1000;
   };
+  const pickBest = (s, role, exclude) => {
+    const t = getT(st, s.taskId), a = A[s.key];
+    const ok = pool(t, role).filter(p => !exclude.includes(p.id) && p.id !== a.cmd && !a.ids.includes(p.id) && !whyNot(st, p.id, s, busy, role));
+    ok.sort((x, y) => (role === 'cmd' ? (x.rank === 'backup') - (y.rank === 'backup') : 0) || score(x.id, s) - score(y.id, s));
+    return ok;
+  };
+  const put = (s, pid, role) => { const a = A[s.key]; if (role === 'cmd') a.cmd = pid; else a.ids.push(pid); busy.add(pid, s.s, s.e, s.key); count(pid, s); };
+  const take = (s, pid) => { const a = A[s.key]; if (a.cmd === pid) a.cmd = null; else a.ids = a.ids.filter(x => x !== pid); busy.del(pid, s.key); count(pid, s, -1); };
   for (const { s } of queue) {
     const t = getT(st, s.taskId), a = A[s.key];
     const mS = t.needed - a.ids.length;
-    if (mS > 0) {
-      const post = byTask(s).isPost, umb = id => (post && inStandby(id, s) ? 0 : 1);
-      const c = soldiers.filter(p => !a.ids.includes(p.id) && !whyNot(st, p.id, s, busy, 'soldier')).sort((x, y) => umb(x.id) - umb(y.id) || score(x.id, s) - score(y.id, s));
-      c.slice(0, mS).forEach(p => { a.ids.push(p.id); busy.add(p.id, s.s, s.e, s.key); count(p.id, s); });
+    if (mS > 0) pickBest(s, 'soldier', []).slice(0, mS).forEach(p => put(s, p.id, 'soldier'));
+    if (t.needsCommander && !a.cmd) { const c = pickBest(s, 'cmd', []); if (c[0]) put(s, c[0].id, 'cmd'); }
+  }
+  // still empty? try one swap: move someone out of a single blocking (non-fixed) shift and backfill that shift
+  const sm2 = slotMap(st, slots);
+  const trySwap = (s, role) => {
+    const t = getT(st, s.taskId), a = A[s.key];
+    const cands = pool(t, role).filter(p => p.id !== a.cmd && !a.ids.includes(p.id)).sort((x, y) => score(x.id, s) - score(y.id, s));
+    for (const p of cands) {
+      const cf = conflicts(st, p.id, s, busy, role);
+      if (cf.length !== 1 || !cf[0].key) continue;
+      const o = sm2[cf[0].key], oa = o && A[o.key];
+      if (!o || !oa || fixed(o)) continue;
+      const oRole = oa.cmd === p.id ? 'cmd' : 'soldier';
+      take(o, p.id);
+      if (!whyNot(st, p.id, s, busy, role)) {
+        put(s, p.id, role);
+        const rep = pickBest(o, oRole, [p.id])[0];
+        if (rep) { put(o, rep.id, oRole); return true; }
+        take(s, p.id);
+      }
+      put(o, p.id, oRole);
     }
-    if (t.needsCommander && !a.cmd) {
-      const ok = cmds.filter(p => !whyNot(st, p.id, s, busy, 'cmd')).sort((x, y) => score(x.id, s) - score(y.id, s));
-      const pick = ok.find(p => p.rank !== 'backup') || ok[0];
-      if (pick) { a.cmd = pick.id; busy.add(pick.id, s.s, s.e, s.key); count(pick.id, s); }
-    }
+    return false;
+  };
+  for (let pass = 0; pass < 2; pass++) for (const s of [...open].sort((x, y) => x.s - y.s)) {
+    const t = getT(st, s.taskId), a = A[s.key];
+    while (a.ids.length < t.needed && trySwap(s, 'soldier'));
+    if (t.needsCommander && !a.cmd) trySwap(s, 'cmd');
   }
   let changed = 0;
   for (const s of slots) {
@@ -288,17 +356,18 @@ function validate(st, now) {
     if (s.blocked) { if (a && (a.ids.length || a.cmd)) issues.push({ key: s.key, day: s.day, type: 'bridge', msg: t.name + ' משובץ בזמן גשר ' + fmtT(s.s) }); continue; }
     const past = st.settings.freezePast && now != null && s.e <= now;
     const ids = a ? a.ids : [];
-    if (!past) {
+    if (!past && !(a && a.ext)) {
       if (ids.length < t.needed) issues.push({ key: s.key, day: s.day, type: 'missing', msg: t.name + ' ' + fmtT(s.s) + '–' + fmtT(s.e) + ': חסרים ' + (t.needed - ids.length) + ' חיילים' });
       if (t.needsCommander && !(a && a.cmd)) issues.push({ key: s.key, day: s.day, type: 'missing', msg: t.name + ' ' + fmtT(s.s) + '–' + fmtT(s.e) + ': חסר מפקד' });
     }
-    if (a) {
+    if (a && !past) {
       const seen = new Set();
       [...ids.map(i => [i, 'soldier']), ...(a.cmd ? [[a.cmd, 'cmd']] : [])].forEach(([pid, role]) => {
         const p = getP(st, pid);
         if (seen.has(pid)) issues.push({ key: s.key, day: s.day, pid, type: 'dup', msg: (p ? p.name : '?') + ' כפול ב' + t.name }); seen.add(pid);
-        const why = whyNot(st, pid, s, busy, role);
-        if (why) issues.push({ key: s.key, day: s.day, pid, type: 'conflict', msg: (p ? p.name : '?') + ' ב' + t.name + ' ' + fmtT(s.s) + ': ' + why });
+        // a rest gap between two shifts that were both set by hand (locked) is the user's call – don't nag
+        const cf = conflicts(st, pid, s, busy, role).filter(c => !(c.kind === 'rest' && a.locked && st.assign[c.key] && st.assign[c.key].locked));
+        if (cf.length) issues.push({ key: s.key, day: s.day, pid, type: 'conflict', msg: (p ? p.name : '?') + ' ב' + t.name + ' ' + fmtT(s.s) + ': ' + cf[0].msg });
       });
     }
   }
@@ -337,11 +406,17 @@ function absentMs(st, pid, s, e) {
   return tot;
 }
 function personStats(st) {
-  const r = {}; st.soldiers.forEach(p => r[p.id] = { shifts: 0, hours: 0, nights: 0 });
+  const r = {}; st.soldiers.forEach(p => r[p.id] = { shifts: 0, hours: 0, nights: 0, patrol: 0, posts: 0, light: 0, hard: 0 });
   const sm = slotMap(st, buildSlots(st));
   for (const key in st.assign) {
     const s = sm[key], a = st.assign[key]; if (!s) continue;
-    [...a.ids, a.cmd].filter(Boolean).forEach(pid => { if (!r[pid]) return; r[pid].shifts++; r[pid].hours += (s.e - s.s) / H; if (isNight(s)) r[pid].nights++; });
+    const t = getT(st, s.taskId), h = (s.e - s.s) / H, w = weightOf(t);
+    [...a.ids, a.cmd].filter(Boolean).forEach(pid => {
+      const x = r[pid]; if (!x) return;
+      x.shifts++; x.hours += h; x.hard += h * w;
+      if (t.isPost) x.posts += h; else if (w >= 0.5) x.patrol += h; else x.light += h;
+      if (isNight(s) && w >= 0.5) x.nights++;
+    });
   }
   return r;
 }
@@ -353,9 +428,10 @@ function capacity(st, now) {
   avgShift = n ? avgShift / n : 4;
   const from = st.settings.freezePast ? Math.max(now, st.settings.start) : st.settings.start, to = addDays(st.settings.start, st.settings.days);
   let availS = 0, availC = 0;
+  const homeMs = homeAt(st, from, to).reduce((x, h) => x + Math.max(0, Math.min(to, h.to == null ? to : h.to) - Math.max(from, h.from)), 0);
   st.soldiers.forEach(p => {
     const act = st.tasks.filter(t => t.enabled), rest = act.length ? act.reduce((x, t) => x + restOf(t), 0) / act.length : 8;
-    const present = Math.max(0, (to - from - absentMs(st, p.id, from, to)) / H);
+    const present = Math.max(0, (to - from - homeMs - absentMs(st, p.id, from, to)) / H);
     const eff = present * avgShift / (avgShift + rest);
     if (p.role === 'commander') availC += eff; else availS += eff;
   });
@@ -427,11 +503,17 @@ function dayChips(days, issues, act) {
 
 function renderSched(issues) {
   const slots = buildSlots(S), days = dayList(), now = Date.now();
-  if (!days.length) return '<div class="panel">אין משמרות. בדוק בהגדרות שיש משימות פעילות.</div>';
+  const end = addDays(S.settings.start, S.settings.days);
+  const rangeBar = `<div class="panel row noprint"><span>📅 טווח הסידור: <b>${fmtDay(S.settings.start)} – ${fmtDay(addDays(end, -1))}</b></span>
+    <button class="btn sm" data-act="addDay">+ הוסף יום</button>${S.settings.days > 1 ? '<button class="btn sec sm" data-act="delDay">− הורד יום</button>' : ''}
+    ${S.home.length ? `<span>🏠 בבית: ${S.home.map(h => fmtDT(h.from) + ' → ' + (h.to == null ? 'לא נקבע' : fmtDT(h.to))).join(' · ')}</span>` : ''}
+    <button class="btn sec sm" data-act="goHome">ערוך זמני בית</button></div>`;
+  if (!days.length) return rangeBar + '<div class="panel">אין משמרות בטווח הזה (כולם בבית או שאין משימות פעילות). אפשר להוסיף ימים או לשנות את זמני הבית.</div>';
+  const ended = end <= now ? `<div class="panel" style="background:var(--warn-bg)"><b>הסידור הסתיים.</b> לחץ "+ הוסף יום" כדי להמשיך — המשמרות שכבר עברו נשמרות ונספרות בהוגנות.</div>` : '';
   const day = pickDay(days), cap = capacity(S, now);
   const bySlot = {}; issues.forEach(i => (bySlot[i.key] = bySlot[i.key] || []).push(i));
-  const capBad = cap.availS < cap.needS || cap.availC < cap.needC;
-  let h = `<div class="row noprint" style="margin-bottom:8px">
+  const capBad = issues.some(i => i.type === 'missing') && (cap.availS < cap.needS || cap.availC < cap.needC);
+  let h = rangeBar + ended + `<div class="row noprint" style="margin-bottom:8px">
     <button class="btn" data-act="repair">השלם חוסרים</button>
     <button class="btn sec" data-act="full">שבץ מחדש הכול</button>
     <span style="flex:1"></span>
@@ -462,8 +544,11 @@ function card(s, t, iss, now) {
     return `<button class="person ${cls} ${badP.has(pid) ? 'bad' : ''}" data-act="seat" data-key="${esc(s.key)}" data-seat="${seat}">${esc(p ? p.name : '?')}</button>`;
   };
   let chips = '';
-  if (t.needsCommander) chips += chip(a.cmd, 'c', 'cmd');
-  for (let i = 0; i < Math.max(t.needed, a.ids.length); i++) chips += chip(a.ids[i], i, '');
+  if (a.ext) chips = `<button class="person ext" data-act="seat" data-key="${esc(s.key)}" data-seat="0">🛡 ${esc(a.ext)}</button>`;
+  else {
+    if (t.needsCommander) chips += chip(a.cmd, 'c', 'cmd');
+    for (let i = 0; i < Math.max(t.needed, a.ids.length); i++) chips += chip(a.ids[i], i, '');
+  }
   return `<div class="card ${iss.length ? 'bad' : ''} ${past ? 'past' : ''}"><div class="ct"><span>${time}</span>
     <button class="lock ${a.locked ? 'on' : ''}" title="נעילה: השיבוץ האוטומטי לא ישנה משמרת נעולה" data-act="lock" data-key="${esc(s.key)}">${a.locked ? '🔒' : '🔓'}</button></div>${chips}</div>`;
 }
@@ -488,8 +573,16 @@ function absLabel(pid, day) {
   if (absentMs(S, pid, ds, de) >= 24 * H) return { cls: 'home', txt: 'בבית כל היום' };
   return { cls: 'part', txt: 'יוצא: ' + l.map(a => (a.from <= ds ? 'מתחילת היום' : fmtT(a.from)) + '–' + (a.to >= de ? 'סוף היום' : fmtT(a.to))).join(', ') };
 }
+function homePanel() {
+  return `<div class="panel" id="homePanel"><h3>🏠 יציאה הביתה של כל הפלוגה</h3>
+    <p class="muted" style="margin-top:0">בזמנים האלה כולם בבית — לא נוצרות משמרות. רק הזמן בצבא מתמלא בטבלה. אם עוד לא יודעים מתי חוזרים, השאר את "חוזרים" ריק.</p>
+    ${S.home.map(h => `<div class="row" style="margin-bottom:6px"><label>יוצאים <input type="datetime-local" data-f="home" data-id="${h.id}" data-k="from" value="${toLocalInput(h.from)}"></label>
+      <label>חוזרים <input type="datetime-local" data-f="home" data-id="${h.id}" data-k="to" value="${h.to == null ? '' : toLocalInput(h.to)}"></label>
+      <button class="btn danger sm" data-act="delHome" data-id="${h.id}">מחק</button></div>`).join('') || '<p class="muted">אין יציאות מוגדרות.</p>'}
+    <button class="btn sec" data-act="addHome">+ יציאה הביתה</button></div>`;
+}
 function renderPres() {
-  const days = dayList(); if (!days.length) return '';
+  const days = dayList(); if (!days.length) return homePanel();
   const day = pickDay(days);
   const cnt = d => S.soldiers.filter(p => absentMs(S, p.id, d, addDays(d, 1)) < 24 * H).length;
   const rows = S.soldiers.map(p => {
@@ -517,7 +610,7 @@ function renderPres() {
   const rep = `<div class="panel noprint"><h3>דוח נוכחות ליום ${fmtDay(day)}</h3><button class="btn sec" data-act="presReport">הצג דוח להעתקה</button>
     <textarea id="repText" readonly style="margin-top:8px;display:none"></textarea><div id="repBtns" style="display:none;margin-top:6px"><button class="btn sec sm" data-act="copyText" data-from="repText">העתק</button></div></div>`;
   return `<div class="panel"><h3 style="margin:0 0 6px">נוכחות – ${fmtDay(day)}: ${cnt(day)} מתוך ${S.soldiers.length} בבסיס</h3>${dayChips(days, null, 'pday')}
-    <div class="scroll"><table><tr><th>שם (אפשר לערוך)</th><th></th><th>מצב ביום הנבחר</th><th>פעולות</th></tr>${rows}</table></div></div>${add}${multi}${rep}${grid}`;
+    <div class="scroll"><table><tr><th>שם (אפשר לערוך)</th><th></th><th>מצב ביום הנבחר</th><th>פעולות</th></tr>${rows}</table></div></div>${homePanel()}${add}${multi}${rep}${grid}`;
 }
 function openAbs(pid) {
   const p = getP(S, pid), t0 = Math.ceil(Date.now() / (30 * MIN)) * 30 * MIN;
@@ -550,19 +643,21 @@ function renderSet() {
       <td><button class="btn danger sm" data-act="delSoldier" data-id="${p.id}">מחק</button></td></tr>`).join('')}</table>
     <h3 style="margin-top:12px">הוספה מהירה (שם בכל שורה)</h3><textarea id="bulk" placeholder="דני כהן&#10;רון לוי"></textarea>
     <div class="row" style="margin-top:6px"><select id="bulkRole"><option value="soldier">חיילים</option><option value="commander">מפקדים</option></select><button class="btn" data-act="bulkAdd">הוסף</button></div></div>`;
-  const tasks = `<div class="panel scroll"><h3>משימות</h3><table><tr><th>שם</th><th>פעילה</th><th>חיילים</th><th>מפקד</th><th>אורך משמרת (ש׳)</th><th>מנוחה אחרי (ש׳)</th><th>עמדה</th><th>מאפשר עמדות</th><th>מ-</th><th>עד</th><th>אסורה בגשר</th><th></th></tr>
+  const tasks = `<div class="panel scroll"><h3>משימות</h3><table><tr><th>שם</th><th>פעילה</th><th>חיילים</th><th>מפקד</th><th>אורך משמרת (ש׳)</th><th>מנוחה אחרי (ש׳)</th><th>קושי (0–1)</th><th>עמדה</th><th>מאפשר עמדות</th><th>מ-</th><th>עד</th><th>אסורה בגשר</th><th></th></tr>
     ${S.tasks.map(t => `<tr><td>${f('task', t.id, 'name', t.name)}</td>
       <td><input type="checkbox" data-f="task" data-id="${t.id}" data-k="enabled" ${t.enabled ? 'checked' : ''}></td>
       <td>${f('task', t.id, 'needed', t.needed, 'number', 'min="1" max="30"')}</td>
       <td><input type="checkbox" data-f="task" data-id="${t.id}" data-k="needsCommander" ${t.needsCommander ? 'checked' : ''}></td>
       <td>${f('task', t.id, 'shiftHours', t.shiftHours, 'number', 'min="0.5" max="24" step="0.5"')}</td>
       <td>${f('task', t.id, 'restAfter', restOf(t), 'number', 'min="0" max="48" step="0.5"')}</td>
+      <td>${f('task', t.id, 'weight', weightOf(t), 'number', 'min="0" max="1" step="0.05"')}</td>
       <td><input type="checkbox" data-f="task" data-id="${t.id}" data-k="isPost" ${t.isPost ? 'checked' : ''}></td>
       <td><input type="checkbox" data-f="task" data-id="${t.id}" data-k="allowPosts" ${t.allowPosts ? 'checked' : ''}></td>
       <td>${f('task', t.id, 'from', t.from, 'time')}</td><td>${f('task', t.id, 'to', t.to, 'time')}</td>
       <td><input type="checkbox" data-f="task" data-id="${t.id}" data-k="bridgeBlocked" ${t.bridgeBlocked ? 'checked' : ''}></td>
       <td><button class="btn danger sm" data-act="delTask" data-id="${t.id}">מחק</button></td></tr>`).join('')}</table>
-    <p class="muted"><b>עמדה</b> = משימה שאפשר לבצע בזמן כוננות. <b>מאפשר עמדות</b> = חיילים במשימה הזו (למשל כרמל) יכולים לעלות לעמדות באמצע, בלי התנגשות ובלי מנוחה ביניהן. עמדות מאוישות קודם מחיילים שנמצאים בכרמל באותה שעה.</p>
+    <p class="muted"><b>מנוחה אחרי</b> = כמה שעות אחרי המשמרת אסור לשבץ את החייל שוב (אחרי סיור – גם לא כרמל). <b>קושי</b> = כמה המשימה נספרת בהוגנות: סיור ועמדות = 1, כרמל ≈ מנוחה (0.25). החלוקה מאזנת לפי "שעות קשות".</p>
+    <p class="muted"><b>עמדה</b> = משימה שאפשר לבצע בזמן כוננות. גם מפקדים יכולים להישלח לעמדות. <b>מאפשר עמדות</b> = חיילים במשימה הזו (למשל כרמל) יכולים לעלות לעמדות באמצע, בלי התנגשות ובלי מנוחה ביניהן. עמדות מאוישות קודם מחיילים שנמצאים בכרמל באותה שעה.</p>
     <p class="muted">שעות זהות ב"מ-" וב"עד" (למשל 00:00–00:00) = פעילה 24 שעות. אם "עד" מוקדם מ"מ-" המשימה נמשכת אחרי חצות.</p>
     <button class="btn" data-act="addTask">+ משימה חדשה</button></div>`;
   const br = `<div class="panel" id="bridgePanel"><h3>זמני גשר (כל יום)</h3><p class="muted">משימה המסומנת "אסורה בגשר" לא תקבל משמרת שחופפת לשעות האלה.</p>
@@ -572,7 +667,7 @@ function renderSet() {
   const gen = `<div class="panel"><h3>כללי</h3><div class="row">
     <p class="muted" style="margin:0">מנוחה מינימלית אחרי משמרת נקבעת לכל משימה בטבלת המשימות (עמודה "מנוחה אחרי").</p></div>
     <div class="row" style="margin-top:8px"><label>תאריך התחלה ${f('set', 0, 'start', toDateInput(g.start), 'date')}</label>
-    <label>מספר ימים ${f('set', 0, 'days', g.days, 'number', 'min="1" max="14"')}</label></div>
+    <label>מספר ימים ${f('set', 0, 'days', g.days, 'number', 'min="1" max="31"')}</label></div>
     <div style="margin-top:8px"><label><input type="checkbox" data-f="set" data-id="0" data-k="freezePast" ${g.freezePast ? 'checked' : ''}> אל תשנה משמרות שכבר עברו</label></div>
     <div><label><input type="checkbox" data-f="set" data-id="0" data-k="autoRepair" ${g.autoRepair ? 'checked' : ''}> שבץ מחדש אוטומטית אחרי כל שינוי בנוכחות/הגדרות</label></div>
     <p><button class="btn danger sm" data-act="resetAll">איפוס מלא לברירת מחדל</button></p></div>`;
@@ -580,16 +675,17 @@ function renderSet() {
 }
 
 function renderStats() {
-  const st = personStats(S), arr = S.soldiers.map(p => ({ p, ...st[p.id] })), max = Math.max(1, ...arr.map(x => x.hours));
+  const st = personStats(S), arr = S.soldiers.map(p => ({ p, ...st[p.id] })).sort((x, y) => y.hard - x.hard), max = Math.max(1, ...arr.map(x => x.hard));
   const slots = buildSlots(S).filter(s => !s.blocked);
   const cov = S.tasks.filter(t => t.enabled).map(t => {
     const ss = slots.filter(s => s.taskId === t.id); let full = 0;
-    ss.forEach(s => { const a = S.assign[s.key]; if (a && a.ids.length >= t.needed && (!t.needsCommander || a.cmd)) full++; });
+    ss.forEach(s => { const a = S.assign[s.key]; if (a && (a.ext || (a.ids.length >= t.needed && (!t.needsCommander || a.cmd)))) full++; });
     return `<tr><td>${esc(t.name)}</td><td>${full} / ${ss.length}</td></tr>`;
   }).join('');
   return `<div class="panel"><h3>כיסוי משמרות</h3><table style="max-width:320px"><tr><th>משימה</th><th>מאוישות במלואן</th></tr>${cov}</table></div>
-    <div class="panel scroll"><h3>עומס לכל חייל (בטווח הימים שנבחר)</h3><table><tr><th>שם</th><th>משמרות</th><th>שעות</th><th>משמרות לילה</th><th style="width:35%"></th></tr>
-    ${arr.map(x => `<tr><td>${esc(x.p.name)} ${x.p.role === 'commander' ? '<span class="tag">מפקד</span>' : ''}</td><td>${x.shifts}</td><td>${x.hours}</td><td>${x.nights}</td><td><div class="bar" style="width:${x.hours / max * 100}%"></div></td></tr>`).join('')}</table></div>`;
+    <div class="panel scroll"><h3>עומס לכל חייל (בטווח הימים שנבחר)</h3><p class="muted" style="margin-top:0">"שעות קשות" = שעות × קושי המשימה (סיור ועמדות נספרים מלא, כרמל כמעט כמו מנוחה). לפי זה השיבוץ מאזן.</p>
+    <table><tr><th>שם</th><th>שעות קשות</th><th>סיור (ש׳)</th><th>עמדות (ש׳)</th><th>כרמל (ש׳)</th><th>משמרות לילה קשות</th><th style="width:30%"></th></tr>
+    ${arr.map(x => `<tr><td>${esc(x.p.name)} ${x.p.role === 'commander' ? '<span class="tag">מפקד</span>' : ''}</td><td><b>${Math.round(x.hard * 10) / 10}</b></td><td>${x.patrol}</td><td>${x.posts}</td><td>${x.light}</td><td>${x.nights}</td><td><div class="bar" style="width:${x.hard / max * 100}%"></div></td></tr>`).join('')}</table></div>`;
 }
 
 function renderShare() {
@@ -616,6 +712,7 @@ function scheduleText(day) {
     out += `\n*${t.name}*\n`;
     ss.forEach(s => {
       const a = S.assign[s.key] || { ids: [], cmd: null };
+      if (a.ext) { out += `${fmtT(s.s)}–${fmtT(s.e)} | ${a.ext}\n`; return; }
       out += `${fmtT(s.s)}–${fmtT(s.e)}${t.needsCommander ? ' | מפקד: ' + (a.cmd ? getP(S, a.cmd).name : '—') : ''} | ${a.ids.map(i => (getP(S, i) || {}).name).join(', ') || '—'}\n`;
     });
   }
@@ -652,7 +749,7 @@ async function decodeState(code) {
 }
 function download(name, text, type) { const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([text], { type })); a.download = name; a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 3000); }
 async function copy(text) { try { await navigator.clipboard.writeText(text); toast('הועתק'); } catch (_) { toast('ההעתקה נחסמה – סמן והעתק ידנית'); } }
-function replaceState(st, msg) { commit(() => { S = Object.assign(defaultState(), st); }, { replan: false, msg }); }
+function replaceState(st, msg) { commit(() => { S = migrate(Object.assign(defaultState(), st)); S.settings = Object.assign(defaultState().settings, S.settings); }, { replan: false, msg }); }
 
 // ---------- seat modal ----------
 function openSeat(key, seat) {
@@ -662,14 +759,16 @@ function openSeat(key, seat) {
   const busy = makeBusy();
   for (const s of slots) { const x = S.assign[s.key]; if (x && !s.blocked) [...x.ids, x.cmd].filter(Boolean).forEach(pid => busy.add(pid, s.s, s.e, s.key)); }
   const st = personStats(S);
-  const list = S.soldiers.filter(p => p.role === (isC ? 'commander' : 'soldier')).map(p => {
+  const list = S.soldiers.filter(p => isC ? p.role === 'commander' : (t.isPost || p.role === 'soldier')).map(p => {
     let why = p.id === cur ? null : (a.ids.includes(p.id) || a.cmd === p.id) ? 'כבר במשמרת הזו' : whyNot(S, p.id, slot, busy, role);
-    return { p, why, hours: st[p.id].hours };
-  }).sort((x, y) => (!!x.why - !!y.why) || (x.p.rank === 'backup') - (y.p.rank === 'backup') || x.hours - y.hours);
+    return { p, why, hard: st[p.id].hard };
+  }).sort((x, y) => (!!x.why - !!y.why) || (isC ? 0 : (x.p.role === 'commander') - (y.p.role === 'commander')) || (x.p.rank === 'backup') - (y.p.rank === 'backup') || x.hard - y.hard);
   $('#modal').innerHTML = `<div class="overlay" data-act="closeModal"><div class="modal">
     <h3>${esc(t.name)} ${fmtT(slot.s)}–${fmtT(slot.e)} · ${isC ? 'מפקד' : 'חייל'}</h3>
     <p class="muted">${cur ? 'מחליף את ' + esc(getP(S, cur).name) + '. ' : ''}מוצגים קודם הפנויים, לפי עומס נמוך. ${isC ? 'מפקד חלופי מוצג אחרון.' : ''}</p>
-    ${list.map(x => `<button class="cand" ${x.why ? 'disabled' : ''} data-act="pick" data-key="${esc(key)}" data-seat="${seat}" data-p="${x.p.id}"><span>${esc(x.p.name)}${x.p.rank === 'backup' ? ' <span class="tag">חלופי</span>' : ''}${x.p.id === cur ? ' ✓' : ''}</span><small>${x.why ? esc(x.why) : x.hours + ' ש׳ בטווח'}</small></button>`).join('')}
+    ${a.ext ? `<div class="panel" style="background:var(--warn-bg)">המשמרת מכוסה ע״י <b>${esc(a.ext)}</b>. <button class="btn sm" data-act="clearExt" data-key="${esc(key)}">בטל – נשבץ אנשים שלנו</button></div>` :
+    list.map(x => `<button class="cand" ${x.why ? 'disabled' : ''} data-act="pick" data-key="${esc(key)}" data-seat="${seat}" data-p="${x.p.id}"><span>${esc(x.p.name)}${x.p.role === 'commander' && !isC ? ' <span class="tag">מפקד</span>' : ''}${x.p.rank === 'backup' ? ' <span class="tag">חלופי</span>' : ''}${x.p.id === cur ? ' ✓' : ''}</span><small>${x.why ? esc(x.why) : Math.round(x.hard) + ' שעות קשות'}</small></button>`).join('')}
+    ${a.ext ? '' : `<div class="row" style="margin-top:12px"><input id="extName" value="מפל״ג" style="width:110px"><button class="btn sec sm" data-act="setExt" data-key="${esc(key)}">כוח חיצוני מכסה את המשמרת</button></div>`}
     <div class="row" style="margin-top:12px">${cur ? `<button class="btn danger" data-act="unseat" data-key="${esc(key)}" data-seat="${seat}">הסר מהמשמרת</button>` : ''}<button class="btn sec" data-act="closeModal">סגור</button></div></div></div>`;
 }
 const ensureA = key => (S.assign[key] = S.assign[key] || { ids: [], cmd: null, locked: false });
@@ -682,6 +781,16 @@ document.addEventListener('click', async e => {
     case 'tab': ui.tab = d.v; render(); break;
     case 'day': ui.day = +d.v; ui.tab = 'sched'; render(); break;
     case 'goBridge': ui.tab = 'set'; render(); document.getElementById('bridgePanel').scrollIntoView(); break;
+    case 'goHome': ui.tab = 'pres'; render(); document.getElementById('homePanel').scrollIntoView(); break;
+    case 'addDay': commit(() => { S.settings.days = Math.min(31, S.settings.days + 1); }, { msg: 'נוסף יום' }); break;
+    case 'delDay': if (await ask('להוריד את היום האחרון מהסידור? השיבוצים שלו יימחקו.', 'הורד')) commit(() => { S.settings.days = Math.max(1, S.settings.days - 1); }); break;
+    case 'addHome': {
+      const end = addDays(S.settings.start, S.settings.days), from = Math.max(dayStart(Date.now()), Math.min(end, addDays(dayStart(Date.now()), 1))) + 16 * H;
+      commit(() => S.home.push({ id: uid(), from, to: null }), { msg: 'נוספה יציאה הביתה – עדכן תאריכים' }); break;
+    }
+    case 'delHome': commit(() => { S.home = S.home.filter(h => h.id !== d.id); }); break;
+    case 'setExt': { const name = ($('#extName').value || '').trim() || 'כוח חיצוני'; $('#modal').innerHTML = ''; commit(() => { const a = ensureA(d.key); a.ext = name; a.ids = []; a.cmd = null; }, { replan: true }); break; }
+    case 'clearExt': $('#modal').innerHTML = ''; commit(() => { delete ensureA(d.key).ext; }); break;
     case 'pday': ui.day = +d.v; render(); break;
     case 'openAbs': openAbs(d.p); break;
     case 'preset': {
@@ -725,7 +834,7 @@ document.addEventListener('click', async e => {
     }
     case 'delAbs': commit(() => { S.absences = S.absences.filter(a => a.id !== d.id); }); break;
     case 'clearOld': commit(() => { S.absences = S.absences.filter(a => a.to > Date.now()); }, { replan: false }); break;
-    case 'presReport': { const t = $('#repText'); t.value = presenceText(+$('#repDay').value); t.style.display = 'block'; $('#repBtns').style.display = 'block'; break; }
+    case 'presReport': { const t = $('#repText'); t.value = presenceText(ui.day); t.style.display = 'block'; $('#repBtns').style.display = 'block'; break; }
     case 'copyText': copy($('#' + d.from).value); break;
     case 'delSoldier': if (await ask('למחוק את ' + getP(S, d.id).name + '?', 'מחק')) commit(() => { S.soldiers = S.soldiers.filter(p => p.id !== d.id); S.absences = S.absences.filter(a => a.pid !== d.id); }); break;
     case 'bulkAdd': {
@@ -733,7 +842,7 @@ document.addEventListener('click', async e => {
       if (!names.length) return;
       commit(() => names.forEach(name => S.soldiers.push({ id: uid(), name, role, rank: role === 'commander' ? 'primary' : null })), { msg: names.length + ' נוספו' }); break;
     }
-    case 'addTask': commit(() => S.tasks.push({ id: uid(), name: 'משימה חדשה', needed: 2, needsCommander: false, shiftHours: 4, from: '00:00', to: '00:00', bridgeBlocked: false, restAfter: 8, isPost: false, allowPosts: false, enabled: true })); break;
+    case 'addTask': commit(() => S.tasks.push({ id: uid(), name: 'משימה חדשה', needed: 2, needsCommander: false, shiftHours: 4, from: '00:00', to: '00:00', bridgeBlocked: false, restAfter: 8, isPost: false, allowPosts: false, weight: 1, enabled: true })); break;
     case 'delTask': if (await ask('למחוק את המשימה "' + getT(S, d.id).name + '"?', 'מחק')) commit(() => { S.tasks = S.tasks.filter(t => t.id !== d.id); }); break;
     case 'addBridge': commit(() => S.bridge.push({ from: '12:00', to: '13:00' })); break;
     case 'delBridge': commit(() => S.bridge.splice(+d.id, 1)); break;
@@ -766,7 +875,8 @@ document.addEventListener('change', async e => {
   let v = el.type === 'checkbox' ? el.checked : el.type === 'number' ? +el.value : el.value;
   const noReplan = (f === 'soldier' && k === 'name') || (f === 'abs' && k === 'note');
   commit(() => {
-    if (f === 'task') { const t = getT(S, id); if (k === 'needed') v = Math.max(1, Math.round(v) || 1); if (k === 'shiftHours') v = Math.max(0.5, v || 4); if (k === 'restAfter') v = Math.max(0, v || 0); t[k] = v; }
+    if (f === 'task') { const t = getT(S, id); if (k === 'needed') v = Math.max(1, Math.round(v) || 1); if (k === 'shiftHours') v = Math.max(0.5, v || 4); if (k === 'restAfter') v = Math.max(0, v || 0); if (k === 'weight') v = Math.min(1, Math.max(0, v || 0)); t[k] = v; }
+    else if (f === 'home') { const h = S.home.find(x => x.id === id); const ms = el.value ? new Date(el.value).getTime() : null; if (k === 'to') h.to = ms; else if (ms) h.from = ms; }
     else if (f === 'soldier') { const p = getP(S, id); p[k] = v; if (k === 'role') p.rank = v === 'commander' ? 'primary' : null; }
     else if (f === 'bridge') S.bridge[+id][k] = v;
     else if (f === 'abs') { const a = S.absences.find(x => x.id === id); a[k] = (k === 'note') ? v : new Date(v).getTime(); if (k !== 'note') normalizeAbsences(S); }
@@ -784,9 +894,8 @@ document.addEventListener('keydown', e => { if (e.key === 'Escape') $('#modal').
   S = loadState();
   const fresh = !S;
   if (!S) S = defaultState();
-  S.tasks.forEach(t => { if (t.isPost === undefined) { t.isPost = t.name === 'שג'; t.allowPosts = /^כרמל/.test(t.name); } });
-  S = Object.assign(defaultState(), S); S.settings = Object.assign(defaultState().settings, S.settings);
-  if (addDays(S.settings.start, S.settings.days) <= Date.now()) { S.settings.start = dayStart(Date.now()); S.assign = {}; runAuto('full'); save(); }
+  S = migrate(Object.assign(defaultState(), S)); S.settings = Object.assign(defaultState().settings, S.settings);
+  // note: an ended range is NOT wiped any more – the schedule tab offers "+ הוסף יום" instead
   if (fresh) { runAuto('full'); save(); }
   render();
   const m = location.hash.match(/#d=(.+)/);
