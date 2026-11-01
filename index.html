@@ -9,12 +9,14 @@
   --bg:#f3f4f1;--panel:#fff;--ink:#1d2320;--muted:#6b756f;--line:#dcdfd8;
   --accent:#3d5a3a;--accent-ink:#fff;--cmd:#b7791f;--cmd-bg:#fbf1dc;
   --bad:#b42318;--bad-bg:#fde8e6;--ok:#2f7d4f;--warn-bg:#fff4d6;--chip:#e9ede6;--blocked:#e4e4e4;
+  --zebra:#e6eae3;--hover:#d5e3d2;
 }
 @media (prefers-color-scheme:dark){
   :root:not([data-theme="light"]){
     --bg:#151915;--panel:#1e241e;--ink:#e8ece6;--muted:#9aa59c;--line:#2f382f;
     --accent:#7fb27a;--accent-ink:#10200f;--cmd:#e3b25a;--cmd-bg:#3a2f16;
     --bad:#ff8b7e;--bad-bg:#3d1c19;--ok:#7fd29d;--warn-bg:#3a3216;--chip:#2a332a;--blocked:#2a2a2a;
+    --zebra:#283028;--hover:#33402f;
   }
 }
 *{box-sizing:border-box}
@@ -72,7 +74,6 @@ th{background:var(--chip);font-weight:600}
 td.pc{text-align:center;cursor:pointer;min-width:62px;user-select:none}
 td.pc.home{background:var(--bad-bg)}
 td.pc.part{background:var(--warn-bg)}
-td.pc.here{background:transparent}
 .stat{padding:2px 9px;border-radius:99px;font-size:13px;white-space:nowrap}
 .stat.here{background:var(--chip);color:var(--ok)}.stat.home{background:var(--bad-bg);color:var(--bad)}.stat.part{background:var(--warn-bg)}
 th.sticky,td.sticky{position:sticky;inset-inline-start:0;background:var(--panel);z-index:1}
@@ -87,6 +88,25 @@ th.sticky,td.sticky{position:sticky;inset-inline-start:0;background:var(--panel)
 .grid2{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:4px}
 .grid2 label{display:flex;gap:5px;align-items:center}
 .tag{font-size:11px;background:var(--cmd-bg);color:var(--cmd);border-radius:4px;padding:0 5px}
+/* zebra rows: every second row shaded, the row under the finger/mouse highlighted */
+tr:nth-child(even)>td{background:var(--zebra)}
+tr:hover>td{background:var(--hover)}
+tr:hover>td.pc.home{background:var(--bad-bg)}tr:hover>td.pc.part{background:var(--warn-bg)}
+.trow:nth-child(even of .trow){background:var(--zebra);border-radius:8px}
+.trow{padding:6px}
+.pbar{background:var(--panel);border-bottom:1px solid var(--line);padding:8px 16px}
+.pbar .big{font-size:16px}
+.pbar select{padding:2px 6px}
+.hours{display:flex;gap:3px;overflow-x:auto;margin-top:6px;padding-bottom:2px}
+.hc{flex:none;min-width:38px;border:1px solid var(--line);background:var(--panel);color:var(--ink);border-radius:6px;padding:2px 3px;cursor:pointer;font:inherit;text-align:center;line-height:1.15}
+.hc small{display:block;font-size:11px;color:var(--muted)}
+.hc.low{background:var(--warn-bg)}.hc.home{background:var(--blocked);color:var(--muted)}
+.hc.on{background:var(--accent);color:var(--accent-ink);border-color:var(--accent)}.hc.on small{color:inherit}
+.alarm{background:var(--bad);color:#fff;padding:12px 16px;font-size:16px}
+.alarm b{font-size:18px}.alarm a{color:#fff;text-decoration:underline;cursor:pointer}
+.alarm ul{margin:4px 0 0;padding-inline-start:20px}
+.person.lent{background:none;border:1px dashed var(--cmd);color:var(--cmd);font-style:italic}
+.tag.borrow{background:var(--warn-bg);color:var(--ink)}
 @media (max-width:640px){.trow{flex-direction:column;gap:2px}.tname{width:auto}}
 @media print{header,nav,.noprint,.days{display:none!important}body{background:#fff}.panel{border:0}}
 </style>
@@ -120,7 +140,7 @@ function defaultState() {
   return {
     v: 1, savedAt: 0, soldiers,
     tasks: [
-      { id: 't1', name: 'סיור', needed: 2, needsCommander: true, shiftHours: 8, from: '00:00', to: '00:00', bridgeBlocked: false, restAfter: 8, isPost: false, allowPosts: false, weight: 1, enabled: true },
+      { id: 't1', name: 'סיור', needed: 2, needsCommander: true, shiftHours: 8, from: '00:00', to: '00:00', bridgeBlocked: false, restAfter: 8, borrowFrom: 't2', isPost: false, allowPosts: false, weight: 1, enabled: true },
       { id: 't2', name: 'כרמל א', needed: 3, needsCommander: true, shiftHours: 8, from: '00:00', to: '00:00', bridgeBlocked: false, restAfter: 0, isPost: false, allowPosts: true, weight: 0.25, enabled: true },
       { id: 't3', name: 'כרמל ב', needed: 3, needsCommander: true, shiftHours: 8, from: '00:00', to: '00:00', bridgeBlocked: false, restAfter: 0, isPost: false, allowPosts: true, weight: 0.4, enabled: true },
       { id: 't4', name: 'שג', needed: 1, needsCommander: false, shiftHours: 2, from: '00:00', to: '00:00', bridgeBlocked: false, restAfter: 4, nightRest: 6, restPref: 6, nightPref: 8, isPost: true, allowPosts: false, weight: 1, enabled: true },
@@ -142,12 +162,19 @@ function migrate(st) {
     if (t.restPref === undefined) t.restPref = t.isPost ? 6 : null;
     if (t.nightPref === undefined) t.nightPref = t.isPost ? 8 : null;
   });
+  // "must be full" tasks borrow a soldier from a standby task when nobody is free (סיור ← כרמל א)
+  if (st.tasks.some(t => t.borrowFrom === undefined)) {
+    st.tasks.forEach(t => { if (t.borrowFrom === undefined) t.borrowFrom = null; });
+    const pat = st.tasks.find(t => t.name === 'סיור'), ca = st.tasks.find(t => t.name === 'כרמל א');
+    if (pat && ca && !pat.borrowFrom) pat.borrowFrom = ca.id;
+  }
   // drop seats that point at a person who no longer exists (shows as "?" and can't be edited)
   const ids = new Set(st.soldiers.map(p => p.id));
   let dropped = 0;
   for (const a of Object.values(st.assign || {})) {
     const n = a.ids.length; a.ids = a.ids.filter(id => ids.has(id)); dropped += n - a.ids.length;
     if (a.cmd && !ids.has(a.cmd)) { a.cmd = null; dropped++; }
+    if (a.borrow) { for (const k in a.borrow) if (!a.ids.includes(k)) delete a.borrow[k]; if (!Object.keys(a.borrow).length) delete a.borrow; }
   }
   st.absences = (st.absences || []).filter(x => ids.has(x.pid));
   migrate.dropped = dropped;
@@ -263,7 +290,7 @@ function autoAssign(st, opts) {
   for (const s of slots) {
     const a = st.assign[s.key];
     if (!a || s.blocked) continue;
-    if (a.locked || a.ext || frozen(s) || mode === 'repair') A[s.key] = { ids: [...a.ids], cmd: a.cmd || null, locked: !!a.locked, ...(a.ext ? { ext: a.ext } : {}) };
+    if (a.locked || a.ext || frozen(s) || mode === 'repair') A[s.key] = { ids: [...a.ids], cmd: a.cmd || null, locked: !!a.locked, ...(a.ext ? { ext: a.ext } : {}), ...(a.borrow ? { borrow: { ...a.borrow } } : {}) };
   }
   const fixed = s => { const a = A[s.key]; return !!(a && (a.locked || a.ext)) || frozen(s); };
   // fairness counts "hard hours": hours × task weight (סיור/עמדות = 1, כרמל ≈ rest)
@@ -289,6 +316,7 @@ function autoAssign(st, opts) {
       if (!whyNot(st, id, s, busy, 'soldier')) { keep.push(id); busy.add(id, s.s, s.e, s.key); count(id, s); }
     }
     a.ids = keep;
+    if (a.borrow) for (const k in a.borrow) if (!keep.includes(k)) delete a.borrow[k];
     if (a.cmd && (!t.needsCommander || keep.includes(a.cmd) || whyNot(st, a.cmd, s, busy, 'cmd'))) a.cmd = null;
     if (a.cmd) { busy.add(a.cmd, s.s, s.e, s.key); count(a.cmd, s); }
   }
@@ -333,7 +361,7 @@ function autoAssign(st, opts) {
     return ok;
   };
   const put = (s, pid, role) => { const a = A[s.key]; if (role === 'cmd') a.cmd = pid; else a.ids.push(pid); busy.add(pid, s.s, s.e, s.key); count(pid, s); };
-  const take = (s, pid) => { const a = A[s.key]; if (a.cmd === pid) a.cmd = null; else a.ids = a.ids.filter(x => x !== pid); busy.del(pid, s.key); count(pid, s, -1); };
+  const take = (s, pid) => { const a = A[s.key]; if (a.cmd === pid) a.cmd = null; else a.ids = a.ids.filter(x => x !== pid); if (a.borrow) delete a.borrow[pid]; busy.del(pid, s.key); count(pid, s, -1); };
   for (const { s } of queue) {
     const t = getT(st, s.taskId), a = A[s.key];
     const mS = t.needed - a.ids.length;
@@ -367,6 +395,39 @@ function autoAssign(st, opts) {
     while (a.ids.length < t.needed && trySwap(s, 'soldier'));
     if (t.needsCommander && !a.cmd) trySwap(s, 'cmd');
   }
+  // a "must be full" task (סיור) still short → take a soldier out of the standby task (כרמל א) at that time.
+  // posts / standby seats that clash with it go to someone else when possible; the standby stays short, marked.
+  // lenient = last resort: a post nobody can take over stays empty (shown as missing) – a full patrol comes first
+  const borrowOne = (s, lenient) => {
+    const t = getT(st, s.taskId), a = A[s.key];
+    const cands = soldiers.filter(p => !a.ids.includes(p.id)).sort((x, y) => score(x.id, s) - score(y.id, s));
+    for (const p of cands) {
+      const cf = conflicts(st, p.id, s, busy, 'soldier');
+      const home = cf.find(c => c.kind === 'overlap' && c.key && c.key.split('|')[0] === t.borrowFrom);
+      if (!home) continue;
+      const o = sm2[home.key];
+      if (!o || fixed(o) || !A[o.key].ids.includes(p.id)) continue;
+      // other blockers: posts / standby seats around it (e.g. the next כרמל, since nothing may follow a patrol) – he is released from them
+      const others = cf.filter(c => c !== home);
+      if (others.some(c => { const x = c.key && sm2[c.key], xt = x && getT(st, x.taskId); return !x || fixed(x) || !(xt.isPost || xt.allowPosts) || !A[x.key].ids.includes(p.id); })) continue;
+      const posts = [...new Set(others.map(c => c.key))].map(k => sm2[k]);
+      take(o, p.id); posts.forEach(ps => take(ps, p.id));
+      const undo = () => { posts.forEach(ps => put(ps, p.id, 'soldier')); put(o, p.id, 'soldier'); };
+      if (whyNot(st, p.id, s, busy, 'soldier')) { undo(); continue; }
+      put(s, p.id, 'soldier');
+      const reps = [];
+      for (const ps of posts) { const r = pickBest(ps, 'soldier', [p.id])[0]; if (!r) { if (lenient) continue; break; } put(ps, r.id, 'soldier'); reps.push([ps, r.id]); }
+      if (reps.length < posts.length && !lenient) { reps.forEach(([ps, rid]) => take(ps, rid)); take(s, p.id); undo(); continue; }
+      const back = pickBest(o, 'soldier', [p.id])[0];
+      if (back) put(o, back.id, 'soldier'); else (a.borrow = a.borrow || {})[p.id] = o.key;
+      return true;
+    }
+    return false;
+  };
+  for (const s of [...open].sort((x, y) => x.s - y.s)) {
+    const t = getT(st, s.taskId), a = A[s.key];
+    if (t.borrowFrom && !a.ext) while (a.ids.length < t.needed && (borrowOne(s, false) || borrowOne(s, true)));
+  }
   // upgrade: a seat that only meets the minimum break goes to someone who gets the preferred one, when there is such a person
   for (let pass = 0; pass < 3; pass++) {
     let moved = 0;
@@ -382,6 +443,12 @@ function autoAssign(st, opts) {
     }
     if (!moved) break;
   }
+  // a borrow mark only stays while the standby shift is really short
+  for (const k in A) {
+    const a = A[k]; if (!a.borrow) continue;
+    for (const pid in a.borrow) { const o = A[a.borrow[pid]], ot = o && sm[a.borrow[pid]] && getT(st, sm[a.borrow[pid]].taskId); if (!a.ids.includes(pid) || !o || !ot || o.ids.length >= ot.needed) delete a.borrow[pid]; }
+    if (!Object.keys(a.borrow).length) delete a.borrow;
+  }
   let changed = 0;
   for (const s of slots) {
     const x = st.assign[s.key], y = A[s.key];
@@ -392,8 +459,14 @@ function autoAssign(st, opts) {
   return { assign: A, changed };
 }
 
+// seats of a standby shift that were lent to a "must be full" task: {slotKey: [pid]}
+function lentMap(st) {
+  const m = {};
+  for (const a of Object.values(st.assign)) if (a.borrow) for (const pid in a.borrow) if (a.ids.includes(pid)) (m[a.borrow[pid]] = m[a.borrow[pid]] || []).push(pid);
+  return m;
+}
 function validate(st, now) {
-  const slots = buildSlots(st), sm = slotMap(st, slots), issues = [];
+  const slots = buildSlots(st), sm = slotMap(st, slots), issues = [], lent = lentMap(st);
   const busy = makeBusy();
   for (const s of slots) { const a = st.assign[s.key]; if (a && !s.blocked) [...a.ids, a.cmd].filter(Boolean).forEach(pid => busy.add(pid, s.s, s.e, s.key)); }
   for (const s of slots) {
@@ -402,8 +475,9 @@ function validate(st, now) {
     const past = st.settings.freezePast && now != null && s.e <= now;
     const ids = a ? a.ids : [];
     if (!past && !(a && a.ext)) {
-      if (ids.length < t.needed) issues.push({ key: s.key, day: s.day, type: 'missing', msg: t.name + ' ' + fmtT(s.s) + '–' + fmtT(s.e) + ': חסרים ' + (t.needed - ids.length) + ' חיילים' });
-      if (t.needsCommander && !(a && a.cmd)) issues.push({ key: s.key, day: s.day, type: 'missing', msg: t.name + ' ' + fmtT(s.s) + '–' + fmtT(s.e) + ': חסר מפקד' });
+      const short = t.needed - ids.length - (lent[s.key] || []).length, crit = !!t.borrowFrom;
+      if (short > 0) issues.push({ key: s.key, day: s.day, type: 'missing', crit, msg: t.name + ' ' + fmtT(s.s) + '–' + fmtT(s.e) + ': חסרים ' + short + ' חיילים' });
+      if (t.needsCommander && !(a && a.cmd)) issues.push({ key: s.key, day: s.day, type: 'missing', crit, msg: t.name + ' ' + fmtT(s.s) + '–' + fmtT(s.e) + ': חסר מפקד' });
     }
     if (a && !past) {
       const seen = new Set();
@@ -490,7 +564,7 @@ const SRC = '<!DOCTYPE html>\n' + document.documentElement.outerHTML;
 const KEY = 'guard-scheduler-v1';
 const $ = s => document.querySelector(s);
 const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-const ui = { tab: 'pres', day: null, view: 'task', pDay: null };
+const ui = { tab: 'pres', day: null, view: 'task', pDay: null, pt: null };
 let S, undoStack = [];
 
 function loadState() {
@@ -600,11 +674,44 @@ function render() {
   $('#app').innerHTML = `<header><h1>🛡️ שיבוץ שמירות</h1>
     ${syncChip()}<span class="status ${issues.length ? 'bad' : ''}">${issues.length ? issues.length + ' בעיות' : 'הכול תקין'}</span>
     <button data-act="undo" ${undoStack.length ? '' : 'disabled'}>↩ בטל</button></header>
+    ${alarmBar(issues)}${presenceBar()}
     <nav>${TABS.map(([k, l]) => `<button class="${ui.tab === k ? 'on' : ''}" data-act="tab" data-v="${k}">${l}</button>`).join('')}</nav>
     <main>${body}</main>`;
   window.scrollTo(0, y);
 }
 
+// very visible warning: a "must be full" task (סיור) is short – above all tabs
+function alarmBar(issues) {
+  const c = issues.filter(i => i.crit); if (!c.length) return '';
+  return `<div class="alarm noprint">⚠ <b>${c.length === 1 ? 'סיור לא מלא!' : c.length + ' משמרות סיור לא מלאות!'}</b>
+    <ul>${c.slice(0, 8).map(i => `<li><a data-act="day" data-v="${i.day}">${fmtDay(i.day)}</a> — ${esc(i.msg)}</li>`).join('')}${c.length > 8 ? '<li>ועוד ' + (c.length - 8) + '…</li>' : ''}</ul></div>`;
+}
+// who is on base at a moment (not on personal leave, unit not at home)
+function presentAt(ms) {
+  if (homeAt(S, ms, ms + 1).length) return { home: true, here: [], away: [] };
+  const away = S.soldiers.filter(p => S.absences.some(a => a.pid === p.id && a.from <= ms && ms < a.to));
+  return { home: false, here: S.soldiers.filter(p => !away.includes(p)), away };
+}
+function presenceBar() {
+  const now = Date.now(), days = []; for (let i = 0; i < S.settings.days; i++) days.push(addDays(S.settings.start, i));
+  const today = dayStart(now); if (!days.includes(today)) days.unshift(today);
+  if (!ui.pt || !days.includes(ui.pt.day)) ui.pt = { day: today, h: new Date(now).getHours() };
+  const { day, h } = ui.pt, at = atHM(day, pad(h) + ':00'), cur = presentAt(at), tot = S.soldiers.length;
+  const isNow = day === today && h === new Date(now).getHours();
+  const nC = cur.here.filter(p => p.role === 'commander').length;
+  const cells = [];
+  for (let x = 0; x < 24; x++) {
+    const r = presentAt(atHM(day, pad(x) + ':00')), n = r.here.length;
+    cells.push(`<button class="hc ${x === h ? 'on' : r.home ? 'home' : n < tot ? 'low' : ''}" data-act="pth" data-v="${x}" title="${r.home ? 'כולם בבית' : esc(r.away.map(p => p.name).join(', '))}"><small>${pad(x)}:00</small>${r.home ? '🏠' : n}</button>`);
+  }
+  return `<div class="pbar noprint"><div class="row">
+    <span class="big">👥 בבסיס <select id="ptDay">${days.map(d => `<option value="${d}" ${d === day ? 'selected' : ''}>${fmtDay(d)}</option>`).join('')}</select>
+      בשעה <select id="ptHour">${Array.from({ length: 24 }, (_, x) => `<option value="${x}" ${x === h ? 'selected' : ''}>${pad(x)}:00</option>`).join('')}</select>:
+      <b>${cur.home ? 'כולם בבית' : cur.here.length + ' מתוך ' + tot}</b></span>
+    ${cur.home ? '' : `<span class="muted">${cur.here.length - nC} חיילים · ${nC} מפקדים${cur.away.length ? ' · בחוץ: ' + esc(cur.away.map(p => p.name).join(', ')) : ''}</span>`}
+    ${isNow ? '' : '<button class="btn sec sm" data-act="ptNow">עכשיו</button>'}</div>
+    <div class="hours">${cells.join('')}</div></div>`;
+}
 function dayList() { const s = new Set(buildSlots(S).map(x => x.day)); return [...s].sort((a, b) => a - b); }
 function pickDay(days) {
   if (!days.includes(ui.day)) { const t = dayStart(Date.now()); ui.day = days.includes(t) ? t : days[0]; }
@@ -632,6 +739,7 @@ function renderSched(issues) {
   let h = rangeBar + ended + `<div class="row noprint" style="margin-bottom:8px">
     <button class="btn" data-act="repair">השלם חוסרים</button>
     <button class="btn sec" data-act="full">שבץ מחדש הכול</button>
+    <button class="btn sec" data-act="xlsx">⬇ טבלת אקסל</button>
     <span style="flex:1"></span>
     <button class="btn sec ${ui.view === 'task' ? '' : ''}" data-act="view" data-v="${ui.view === 'task' ? 'person' : 'task'}">תצוגה: ${ui.view === 'task' ? 'לפי משימה' : 'לפי חייל'}</button></div>
     <div class="panel ${capBad ? '' : ''}" style="${capBad ? 'background:var(--warn-bg)' : ''}"><span class="muted">קיבולת משוערת (כולל מנוחה): חיילים ${Math.round(cap.availS)} שעות-חייל זמינות מול ${Math.round(cap.needS)} נדרשות · מפקדים ${Math.round(cap.availC)} מול ${Math.round(cap.needC)}${capBad ? ' — <b>אין מספיק כוח אדם לכל המשמרות</b>' : ''}</span></div>`;
@@ -658,13 +766,19 @@ function card(s, t, iss, now) {
     if (!pid) return `<button class="person empty" data-act="seat" data-key="${esc(s.key)}" data-seat="${seat}">+ ${seat === 'c' ? 'מפקד' : 'חסר'}</button>`;
     const p = getP(S, pid);
     if (!p) return chip(null, seat, cls);
-    return `<button class="person ${cls} ${badP.has(pid) ? 'bad' : ''}" data-act="seat" data-key="${esc(s.key)}" data-seat="${seat}">${esc(p ? p.name : '?')}</button>`;
+    const bf = a.borrow && a.borrow[pid] ? getT(S, a.borrow[pid].split('|')[0]) : null;
+    return `<button class="person ${cls} ${badP.has(pid) ? 'bad' : ''}" data-act="seat" data-key="${esc(s.key)}" data-seat="${seat}">${esc(p ? p.name : '?')}${bf ? ` <span class="tag borrow">↩ מ${esc(bf.name)}</span>` : ''}</button>`;
   };
+  // seats of this standby shift that went to the patrol (shown instead of "missing")
+  const lent = (lentMap(S)[s.key] || []).slice();
   let chips = '';
   if (a.ext) chips = `<button class="person ext" data-act="seat" data-key="${esc(s.key)}" data-seat="0">🛡 ${esc(a.ext)}</button>`;
   else {
     if (t.needsCommander) chips += chip(a.cmd, 'c', 'cmd');
-    for (let i = 0; i < Math.max(t.needed, a.ids.length); i++) chips += chip(a.ids[i], i, '');
+    for (let i = 0; i < Math.max(t.needed, a.ids.length); i++) {
+      if (!a.ids[i] && lent.length) { const lp = getP(S, lent.shift()); chips += `<button class="person lent" title="נלקח להשלמת סיור" data-act="seat" data-key="${esc(s.key)}" data-seat="${i}">↪ ${esc(lp ? lp.name : '?')} עבר לסיור</button>`; continue; }
+      chips += chip(a.ids[i], i, '');
+    }
   }
   return `<div class="card ${iss.length ? 'bad' : ''} ${past ? 'past' : ''}"><div class="ct"><span>${time}</span>
     <button class="lock ${a.locked ? 'on' : ''}" title="נעילה: השיבוץ האוטומטי לא ישנה משמרת נעולה" data-act="lock" data-key="${esc(s.key)}">${a.locked ? '🔒' : '🔓'}</button></div>${chips}</div>`;
@@ -721,25 +835,30 @@ function renderPres() {
   const add = `<div class="panel row noprint"><b>הוספת חייל:</b><input id="newName" placeholder="שם" style="flex:1;min-width:140px"><select id="newRole"><option value="soldier">חייל</option><option value="commander">מפקד</option></select><button class="btn" data-act="addPerson">הוסף</button></div>`;
   const multi = `<details class="panel noprint"><summary><b>יציאה למספר חיילים בבת אחת</b></summary>
     <div class="grid2" id="absPick" style="margin:8px 0">${S.soldiers.map(p => `<label><input type="checkbox" value="${p.id}"> ${esc(p.name)}</label>`).join('')}</div>
-    <div class="row"><label>יוצא <input type="datetime-local" id="absFrom" value="${toLocalInput(dayStart(Date.now()) + 8 * H)}"></label>
-    <label>חוזר <input type="datetime-local" id="absTo" value="${toLocalInput(dayStart(Date.now()) + 32 * H)}"></label>
+    <div class="row"><label>יוצא <input type="datetime-local" id="absFrom" value="${toLocalInput(atHM(day, '08:00'))}"></label>
+    <label>חוזר <input type="datetime-local" id="absTo" value="${toLocalInput(atHM(addDays(day, 1), '08:00'))}"></label>
     <input id="absNote" placeholder="הערה (אופציונלי)"><button class="btn" data-act="addAbs">סמן כיציאה</button></div></details>`;
   const rep = `<div class="panel noprint"><h3>דוח נוכחות ליום ${fmtDay(day)}</h3><button class="btn sec" data-act="presReport">הצג דוח להעתקה</button>
     <textarea id="repText" readonly style="margin-top:8px;display:none"></textarea><div id="repBtns" style="display:none;margin-top:6px"><button class="btn sec sm" data-act="copyText" data-from="repText">העתק</button></div></div>`;
   return `<div class="panel"><h3 style="margin:0 0 6px">נוכחות – ${fmtDay(day)}: ${cnt(day)} מתוך ${S.soldiers.length} בבסיס</h3>${dayChips(days, null, 'pday')}
     <div class="scroll"><table><tr><th>שם (אפשר לערוך)</th><th></th><th>מצב ביום הנבחר</th><th>פעולות</th></tr>${rows}</table></div></div>${homePanel()}${add}${multi}${rep}${grid}`;
 }
+// the day picked on the screen (not always today): leave forms open on that date, at the current clock time
+function absBase() {
+  const n = Date.now(), td = dayStart(n), r = Math.ceil(n / (30 * MIN)) * 30 * MIN, d = ui.day != null ? ui.day : td;
+  return { d, t0: d === td ? r : atHM(d, fmtT(r)) };
+}
 function openAbs(pid) {
-  const p = getP(S, pid), t0 = Math.ceil(Date.now() / (30 * MIN)) * 30 * MIN;
+  const p = getP(S, pid), { d: bd, t0 } = absBase();
   const list = S.absences.filter(a => a.pid === pid).sort((x, y) => x.from - y.from);
   $('#modal').innerHTML = `<div class="overlay" data-act="closeModal"><div class="modal">
     <h3>יציאה – ${esc(p.name)}</h3>
     <div class="row" style="margin-bottom:8px">
-      <button class="btn sec sm" data-act="preset" data-v="today">כל היום</button>
-      <button class="btn sec sm" data-act="preset" data-v="tomorrow">מחר כל היום</button>
-      <button class="btn sec sm" data-act="preset" data-v="h4">4 שעות מעכשיו</button>
-      <button class="btn sec sm" data-act="preset" data-v="h8">8 שעות מעכשיו</button>
-      <button class="btn sec sm" data-act="preset" data-v="d3">3 ימים</button></div>
+      <button class="btn sec sm" data-act="preset" data-v="today">כל ${fmtDay(bd)}</button>
+      <button class="btn sec sm" data-act="preset" data-v="tomorrow">כל ${fmtDay(addDays(bd, 1))}</button>
+      <button class="btn sec sm" data-act="preset" data-v="h4">4 שעות מ"יוצא"</button>
+      <button class="btn sec sm" data-act="preset" data-v="h8">8 שעות מ"יוצא"</button>
+      <button class="btn sec sm" data-act="preset" data-v="d3">3 ימים מ-${fmtD(bd)}</button></div>
     <div class="row" style="flex-direction:column;align-items:stretch;gap:8px">
       <label>יוצא <input type="datetime-local" id="mFrom" value="${toLocalInput(t0)}"></label>
       <label>חוזר <input type="datetime-local" id="mTo" value="${toLocalInput(t0 + 4 * H)}"></label>
@@ -760,7 +879,7 @@ function renderSet() {
       <td><button class="btn danger sm" data-act="delSoldier" data-id="${p.id}">מחק</button></td></tr>`).join('')}</table>
     <h3 style="margin-top:12px">הוספה מהירה (שם בכל שורה)</h3><textarea id="bulk" placeholder="דני כהן&#10;רון לוי"></textarea>
     <div class="row" style="margin-top:6px"><select id="bulkRole"><option value="soldier">חיילים</option><option value="commander">מפקדים</option></select><button class="btn" data-act="bulkAdd">הוסף</button></div></div>`;
-  const tasks = `<div class="panel scroll"><h3>משימות</h3><table><tr><th>שם</th><th>פעילה</th><th>חיילים</th><th>מפקד</th><th>אורך משמרת (ש׳)</th><th>מנוחה אחרי (ש׳)</th><th>מנוחה רצויה (ש׳)</th><th>שינה בלילה (ש׳)</th><th>שינה רצויה (ש׳)</th><th>קושי (0–1)</th><th>עמדה</th><th>מאפשר עמדות</th><th>מ-</th><th>עד</th><th>אסורה בגשר</th><th></th></tr>
+  const tasks = `<div class="panel scroll"><h3>משימות</h3><table><tr><th>שם</th><th>פעילה</th><th>חיילים</th><th>מפקד</th><th>אורך משמרת (ש׳)</th><th>מנוחה אחרי (ש׳)</th><th>מנוחה רצויה (ש׳)</th><th>שינה בלילה (ש׳)</th><th>שינה רצויה (ש׳)</th><th>חייבת להיות מלאה – השלמה מ-</th><th>קושי (0–1)</th><th>עמדה</th><th>מאפשר עמדות</th><th>מ-</th><th>עד</th><th>אסורה בגשר</th><th></th></tr>
     ${S.tasks.map(t => `<tr><td>${f('task', t.id, 'name', t.name)}</td>
       <td><input type="checkbox" data-f="task" data-id="${t.id}" data-k="enabled" ${t.enabled ? 'checked' : ''}></td>
       <td>${f('task', t.id, 'needed', t.needed, 'number', 'min="1" max="30"')}</td>
@@ -768,13 +887,14 @@ function renderSet() {
       <td>${f('task', t.id, 'shiftHours', t.shiftHours, 'number', 'min="0.5" max="24" step="0.5"')}</td>
       <td>${f('task', t.id, 'restAfter', restOf(t), 'number', 'min="0" max="48" step="0.5"')}</td>
       ${['restPref', 'nightRest', 'nightPref'].map(k => `<td>${f('task', t.id, k, t[k] == null ? '' : t[k], 'number', 'min="0" max="48" step="0.5" placeholder="—"')}</td>`).join('')}
+      <td><select data-f="task" data-id="${t.id}" data-k="borrowFrom"><option value="">—</option>${S.tasks.filter(o => o.id !== t.id && o.allowPosts).map(o => `<option value="${o.id}" ${t.borrowFrom === o.id ? 'selected' : ''}>${esc(o.name)}</option>`).join('')}</select></td>
       <td>${f('task', t.id, 'weight', weightOf(t), 'number', 'min="0" max="1" step="0.05"')}</td>
       <td><input type="checkbox" data-f="task" data-id="${t.id}" data-k="isPost" ${t.isPost ? 'checked' : ''}></td>
       <td><input type="checkbox" data-f="task" data-id="${t.id}" data-k="allowPosts" ${t.allowPosts ? 'checked' : ''}></td>
       <td>${f('task', t.id, 'from', t.from, 'time')}</td><td>${f('task', t.id, 'to', t.to, 'time')}</td>
       <td><input type="checkbox" data-f="task" data-id="${t.id}" data-k="bridgeBlocked" ${t.bridgeBlocked ? 'checked' : ''}></td>
       <td><button class="btn danger sm" data-act="delTask" data-id="${t.id}">מחק</button></td></tr>`).join('')}</table>
-    <p class="muted"><b>מנוחה אחרי</b> = כמה שעות אחרי המשמרת אסור לשבץ את החייל שוב (אחרי סיור – גם לא כרמל). <b>שינה בלילה</b> = אם ההפסקה אחרי המשמרת נופלת בין 00:00 ל-06:00, היא צריכה להיות לפחות כך (למשל עמדה 22:00–00:00 ואחריה 04:00–06:00 – אסור). ריק = כמו "מנוחה אחרי". <b>רצויה</b> = מה שהשיבוץ מנסה לתת (ביום 06:00–00:00 / בלילה) כשיש מי שמתאים; אם אין – מסתפק במינימום. <b>קושי</b> = כמה המשימה נספרת בהוגנות: סיור ועמדות = 1, כרמל ≈ מנוחה (0.25). החלוקה מאזנת לפי "שעות קשות".</p>
+    <p class="muted"><b>מנוחה אחרי</b> = כמה שעות אחרי המשמרת אסור לשבץ את החייל שוב (אחרי סיור – גם לא כרמל). <b>שינה בלילה</b> = אם ההפסקה אחרי המשמרת נופלת בין 00:00 ל-06:00, היא צריכה להיות לפחות כך (למשל עמדה 22:00–00:00 ואחריה 04:00–06:00 – אסור). ריק = כמו "מנוחה אחרי". <b>חייבת להיות מלאה</b> = אם אין חייל פנוי, לוקחים חייל מהכוננות שנבחרה (למשל סיור ← כרמל א) ומסמנים זאת; אם עדיין חסר – מופיעה התראה אדומה בראש האתר. <b>רצויה</b> = מה שהשיבוץ מנסה לתת (ביום 06:00–00:00 / בלילה) כשיש מי שמתאים; אם אין – מסתפק במינימום. <b>קושי</b> = כמה המשימה נספרת בהוגנות: סיור ועמדות = 1, כרמל ≈ מנוחה (0.25). החלוקה מאזנת לפי "שעות קשות".</p>
     <p class="muted"><b>עמדה</b> = משימה שאפשר לבצע בזמן כוננות. גם מפקדים יכולים להישלח לעמדות. <b>מאפשר עמדות</b> = חיילים במשימה הזו (למשל כרמל) יכולים לעלות לעמדות באמצע, בלי התנגשות ובלי מנוחה ביניהן. עמדות מאוישות קודם מחיילים שנמצאים בכרמל באותה שעה.</p>
     <p class="muted">שעות זהות ב"מ-" וב"עד" (למשל 00:00–00:00) = פעילה 24 שעות. אם "עד" מוקדם מ"מ-" המשימה נמשכת אחרי חצות.</p>
     <button class="btn" data-act="addTask">+ משימה חדשה</button></div>`;
@@ -824,7 +944,7 @@ function renderShare() {
     <div class="row" style="margin-top:6px"><button class="btn" data-act="importCode">ייבא קוד</button><label class="btn sec" style="cursor:pointer">ייבא קובץ JSON<input type="file" id="jsonIn" accept=".json,application/json" style="display:none"></label></div>
     <p class="muted">ייבוא מחליף את כל הנתונים הנוכחיים (אפשר לבטל עם "בטל").</p></div>
   <div class="panel"><h3>שיבוץ לשליחה / הדפסה</h3><div class="row"><select id="waDay">${days.map(d => `<option value="${d}" ${d === ui.day ? 'selected' : ''}>${fmtDay(d)}</option>`).join('')}</select>
-    <button class="btn sec" data-act="waText">הצג טקסט</button><button class="btn sec" data-act="print">🖨 הדפס</button></div>
+    <button class="btn sec" data-act="waText">הצג טקסט</button><button class="btn sec" data-act="print">🖨 הדפס</button><button class="btn" data-act="xlsx">⬇ טבלת אקסל (כל הימים)</button></div>
     <textarea id="waOut" readonly style="margin-top:8px;display:none"></textarea>
     <div id="waBtns" style="display:none;margin-top:6px" class="row"><button class="btn sec sm" data-act="copyText" data-from="waOut">העתק</button><button class="btn sm" data-act="waOpen">שלח בוואטסאפ</button></div></div>`;
 }
@@ -837,7 +957,8 @@ function scheduleText(day) {
     ss.forEach(s => {
       const a = S.assign[s.key] || { ids: [], cmd: null };
       if (a.ext) { out += `${fmtT(s.s)}–${fmtT(s.e)} | ${a.ext}\n`; return; }
-      out += `${fmtT(s.s)}–${fmtT(s.e)}${t.needsCommander ? ' | מפקד: ' + (a.cmd ? getP(S, a.cmd).name : '—') : ''} | ${a.ids.map(i => (getP(S, i) || {}).name).join(', ') || '—'}\n`;
+      const lent = (lentMap(S)[s.key] || []).length, bn = i => a.borrow && a.borrow[i] ? ' (מ' + (getT(S, a.borrow[i].split('|')[0]) || {}).name + ')' : '';
+      out += `${fmtT(s.s)}–${fmtT(s.e)}${t.needsCommander ? ' | מפקד: ' + (a.cmd ? getP(S, a.cmd).name : '—') : ''} | ${a.ids.map(i => (getP(S, i) || {}).name + bn(i)).join(', ') || '—'}${lent ? ' | ' + lent + ' עבר לסיור' : ''}\n`;
     });
   }
   return out;
@@ -870,6 +991,144 @@ async function decodeState(code) {
   const st = JSON.parse(new TextDecoder().decode(u));
   if (!st || !st.soldiers || !st.tasks) throw new Error('bad');
   return st;
+}
+// ---------- Excel (.xlsx) export: a sheet per day (rows = hours, columns = tasks) + a sheet per soldier ----------
+const crcT = (() => { const t = new Uint32Array(256); for (let n = 0; n < 256; n++) { let c = n; for (let k = 0; k < 8; k++) c = c & 1 ? 0xEDB88320 ^ (c >>> 1) : c >>> 1; t[n] = c >>> 0; } return t; })();
+const crc32 = u => { let c = 0xFFFFFFFF; for (let i = 0; i < u.length; i++) c = crcT[(c ^ u[i]) & 255] ^ (c >>> 8); return (c ^ 0xFFFFFFFF) >>> 0; };
+function zipStore(files) { // [{name, data:string}] → Uint8Array (stored, no compression)
+  const enc = new TextEncoder(), parts = [], cent = []; let off = 0;
+  const d = new Date(), dt = ((d.getFullYear() - 1980) << 9) | ((d.getMonth() + 1) << 5) | d.getDate(), tm = (d.getHours() << 11) | (d.getMinutes() << 5);
+  for (const f of files) {
+    const nm = enc.encode(f.name), data = enc.encode(f.data), crc = crc32(data);
+    const h = new DataView(new ArrayBuffer(30));
+    [[0, 0x04034b50, 4], [4, 20, 2], [6, 0x0800, 2], [8, 0, 2], [10, tm, 2], [12, dt, 2], [14, crc, 4], [18, data.length, 4], [22, data.length, 4], [26, nm.length, 2], [28, 0, 2]].forEach(([o, v, n]) => n === 4 ? h.setUint32(o, v, true) : h.setUint16(o, v, true));
+    const c = new DataView(new ArrayBuffer(46));
+    [[0, 0x02014b50, 4], [4, 20, 2], [6, 20, 2], [8, 0x0800, 2], [10, 0, 2], [12, tm, 2], [14, dt, 2], [16, crc, 4], [20, data.length, 4], [24, data.length, 4], [28, nm.length, 2], [30, 0, 2], [32, 0, 2], [34, 0, 2], [36, 0, 2], [38, 0, 4], [42, off, 4]].forEach(([o, v, n]) => n === 4 ? c.setUint32(o, v, true) : c.setUint16(o, v, true));
+    parts.push(new Uint8Array(h.buffer), nm, data); cent.push(new Uint8Array(c.buffer), nm);
+    off += 30 + nm.length + data.length;
+  }
+  const cs = cent.reduce((x, u) => x + u.length, 0), e = new DataView(new ArrayBuffer(22));
+  [[0, 0x06054b50, 4], [8, files.length, 2], [10, files.length, 2], [12, cs, 4], [16, off, 4]].forEach(([o, v, n]) => n === 4 ? e.setUint32(o, v, true) : e.setUint16(o, v, true));
+  const all = [...parts, ...cent, new Uint8Array(e.buffer)], out = new Uint8Array(all.reduce((x, u) => x + u.length, 0));
+  let p = 0; all.forEach(u => { out.set(u, p); p += u.length; }); return out;
+}
+const xesc = v => String(v).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+const colL = i => { let s = ''; i++; while (i) { const m = (i - 1) % 26; s = String.fromCharCode(65 + m) + s; i = (i - m - 1) / 26; } return s; };
+// styles: 1 title · 2 header · 3 time · 4 cell · 5 cell (zebra) · 6 no shift · 7 missing · 8 time (zebra)
+const XL_STYLES = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+<fonts count="4"><font><sz val="11"/><name val="Arial"/></font><font><b/><sz val="11"/><name val="Arial"/></font><font><b/><sz val="14"/><name val="Arial"/></font><font><b/><sz val="11"/><color rgb="FFB42318"/><name val="Arial"/></font></fonts>
+<fills count="6"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill><fill><patternFill patternType="solid"><fgColor rgb="FFD9E5D6"/></patternFill></fill><fill><patternFill patternType="solid"><fgColor rgb="FFE4E4E4"/></patternFill></fill><fill><patternFill patternType="solid"><fgColor rgb="FFEEF2EB"/></patternFill></fill><fill><patternFill patternType="solid"><fgColor rgb="FFFDE8E6"/></patternFill></fill></fills>
+<borders count="2"><border><left/><right/><top/><bottom/><diagonal/></border><border><left style="thin"><color rgb="FF8A948C"/></left><right style="thin"><color rgb="FF8A948C"/></right><top style="thin"><color rgb="FF8A948C"/></top><bottom style="thin"><color rgb="FF8A948C"/></bottom><diagonal/></border></borders>
+<cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>
+<cellXfs count="9"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/>
+<xf numFmtId="0" fontId="2" fillId="0" borderId="0" xfId="0" applyFont="1" applyAlignment="1"><alignment horizontal="center" vertical="center" readingOrder="2"/></xf>
+<xf numFmtId="0" fontId="1" fillId="2" borderId="1" xfId="0" applyFont="1" applyFill="1" applyBorder="1" applyAlignment="1"><alignment horizontal="center" vertical="center" wrapText="1" readingOrder="2"/></xf>
+<xf numFmtId="0" fontId="1" fillId="0" borderId="1" xfId="0" applyFont="1" applyBorder="1" applyAlignment="1"><alignment horizontal="center" vertical="center" readingOrder="2"/></xf>
+<xf numFmtId="0" fontId="0" fillId="0" borderId="1" xfId="0" applyBorder="1" applyAlignment="1"><alignment horizontal="center" vertical="center" wrapText="1" readingOrder="2"/></xf>
+<xf numFmtId="0" fontId="0" fillId="4" borderId="1" xfId="0" applyFill="1" applyBorder="1" applyAlignment="1"><alignment horizontal="center" vertical="center" wrapText="1" readingOrder="2"/></xf>
+<xf numFmtId="0" fontId="0" fillId="3" borderId="1" xfId="0" applyFill="1" applyBorder="1"/>
+<xf numFmtId="0" fontId="3" fillId="5" borderId="1" xfId="0" applyFont="1" applyFill="1" applyBorder="1" applyAlignment="1"><alignment horizontal="center" vertical="center" wrapText="1" readingOrder="2"/></xf>
+<xf numFmtId="0" fontId="1" fillId="4" borderId="1" xfId="0" applyFont="1" applyFill="1" applyBorder="1" applyAlignment="1"><alignment horizontal="center" vertical="center" readingOrder="2"/></xf>
+</cellXfs><cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles></styleSheet>`;
+// grid: {cells: {"r,c": {v, s}}, merges: ["A1:B2"], widths: [], heights: {r: pt}, rows, cols, freeze}
+function sheetXml(g) {
+  let rows = '';
+  for (let r = 0; r < g.rows; r++) {
+    let cs = '';
+    for (let c = 0; c < g.cols; c++) {
+      const x = g.cells[r + ',' + c]; if (!x) continue;
+      const ref = colL(c) + (r + 1);
+      cs += x.v == null || x.v === '' ? `<c r="${ref}" s="${x.s}"/>` : `<c r="${ref}" s="${x.s}" t="inlineStr"><is><t xml:space="preserve">${xesc(x.v)}</t></is></c>`;
+    }
+    rows += `<row r="${r + 1}"${g.heights[r] ? ` ht="${g.heights[r]}" customHeight="1"` : ''}>${cs}</row>`;
+  }
+  return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+<sheetPr><pageSetUpPr fitToPage="1"/></sheetPr><sheetViews><sheetView rightToLeft="1" workbookViewId="0">${g.freeze ? `<pane ySplit="${g.freeze}" topLeftCell="A${g.freeze + 1}" activePane="bottomLeft" state="frozen"/>` : ''}</sheetView></sheetViews>
+<sheetFormatPr defaultRowHeight="15"/><cols>${g.widths.map((w, i) => `<col min="${i + 1}" max="${i + 1}" width="${w}" customWidth="1"/>`).join('')}</cols>
+<sheetData>${rows}</sheetData>${g.merges.length ? `<mergeCells count="${g.merges.length}">${g.merges.map(m => `<mergeCell ref="${m}"/>`).join('')}</mergeCells>` : ''}
+<pageMargins left="0.3" right="0.3" top="0.4" bottom="0.4" header="0.2" footer="0.2"/><pageSetup orientation="portrait" fitToWidth="1" fitToHeight="0"/></worksheet>`;
+}
+function slotText(s, t, lent) {
+  if (s.blocked) return { v: 'גשר', s: 6 };
+  const a = S.assign[s.key] || { ids: [], cmd: null };
+  if (a.ext) return { v: a.ext, s: 4, lines: 1 };
+  const nm = id => (getP(S, id) || {}).name || '?', lines = [];
+  let miss = 0;
+  if (t.needsCommander) { if (a.cmd) lines.push('מפ׳ ' + nm(a.cmd)); else { lines.push('חסר מפקד'); miss++; } }
+  a.ids.forEach(i => lines.push(nm(i) + (a.borrow && a.borrow[i] ? ' (מ' + ((getT(S, a.borrow[i].split('|')[0]) || {}).name || '') + ')' : '')));
+  const l = (lent[s.key] || []).slice(0, Math.max(0, t.needed - a.ids.length));
+  l.forEach(i => lines.push('↪ ' + nm(i) + ' בסיור'));
+  const short = t.needed - a.ids.length - l.length;
+  for (let i = 0; i < short; i++) { lines.push('חסר'); miss++; }
+  return { v: lines.join('\n'), s: miss ? 7 : null, lines: lines.length };
+}
+function daySheet(day, slots, lent) {
+  const tasks = S.tasks.filter(t => t.enabled), de = addDays(day, 1);
+  const ds = slots.filter(s => s.day === day), b = new Set();
+  ds.forEach(s => { b.add(Math.max(day, s.s)); b.add(Math.min(de, s.e)); });
+  const bounds = [...b].sort((x, y) => x - y), R = bounds.length - 1, top = 2;
+  const g = { cells: {}, merges: [], widths: [14, ...tasks.map(() => 17)], heights: { 0: 24, 1: 20 }, rows: top + R, cols: tasks.length + 1, freeze: 2 };
+  const set = (r, c, v, s) => { g.cells[r + ',' + c] = { v, s }; };
+  set(0, 0, 'שמירות – ' + fmtDay(day), 1); for (let c = 1; c < g.cols; c++) set(0, c, '', 1);
+  g.merges.push(`A1:${colL(g.cols - 1)}1`);
+  set(1, 0, 'שעה', 2); tasks.forEach((t, i) => set(1, i + 1, t.name, 2));
+  const need = Array(R).fill(18);
+  for (let r = 0; r < R; r++) set(top + r, 0, fmtT(bounds[r]) + '–' + fmtT(bounds[r + 1]), r % 2 ? 8 : 3);
+  tasks.forEach((t, i) => {
+    const c = i + 1, cov = Array(R).fill(false);
+    ds.filter(s => s.taskId === t.id).forEach(s => {
+      const r0 = bounds.indexOf(Math.max(day, s.s)), r1 = bounds.indexOf(Math.min(de, s.e));
+      if (r0 < 0 || r1 <= r0) return;
+      const x = slotText(s, t, lent), st = x.s != null ? x.s : (r0 % 2 ? 5 : 4);
+      for (let r = r0; r < r1; r++) { cov[r] = true; set(top + r, c, r === r0 ? x.v : '', st); }
+      if (r1 - r0 > 1) g.merges.push(`${colL(c)}${top + r0 + 1}:${colL(c)}${top + r1}`);
+      const per = Math.ceil(((x.lines || 1) * 15 + 4) / (r1 - r0));
+      for (let r = r0; r < r1; r++) need[r] = Math.max(need[r], per);
+    });
+    for (let r = 0; r < R; r++) if (!cov[r]) set(top + r, c, '', 6);
+  });
+  need.forEach((h, r) => g.heights[top + r] = h);
+  return g;
+}
+function personSheet(days, slots) {
+  const sm = slotMap(S, slots), g = { cells: {}, merges: [], widths: [16, ...days.map(() => 22)], heights: { 0: 24, 1: 20 }, rows: S.soldiers.length + 2, cols: days.length + 1, freeze: 2 };
+  const set = (r, c, v, s) => { g.cells[r + ',' + c] = { v, s }; };
+  set(0, 0, 'שמירות לפי חייל', 1); for (let c = 1; c < g.cols; c++) set(0, c, '', 1); g.merges.push(`A1:${colL(g.cols - 1)}1`);
+  set(1, 0, 'שם', 2); days.forEach((d, i) => set(1, i + 1, fmtDay(d), 2));
+  S.soldiers.forEach((p, r) => {
+    const z = r % 2; let mx = 1;
+    set(r + 2, 0, p.name + (p.role === 'commander' ? ' (מפ׳)' : ''), z ? 8 : 3);
+    days.forEach((d, i) => {
+      const items = [];
+      for (const key in S.assign) { const s = sm[key], a = S.assign[key]; if (!s || s.day !== d || s.blocked) continue; if (a.ids.includes(p.id) || a.cmd === p.id) items.push(s); }
+      items.sort((x, y) => x.s - y.s);
+      const away = absentMs(S, p.id, d, addDays(d, 1)) >= 24 * H;
+      const lines = items.map(s => fmtT(s.s) + '–' + fmtT(s.e) + ' ' + getT(S, s.taskId).name);
+      if (away && !lines.length) lines.push('בבית');
+      mx = Math.max(mx, lines.length);
+      set(r + 2, i + 1, lines.join('\n'), z ? 5 : 4);
+    });
+    g.heights[r + 2] = Math.max(18, mx * 15 + 4);
+  });
+  return g;
+}
+function downloadXlsx() {
+  const slots = buildSlots(S), days = dayList(), lent = lentMap(S);
+  if (!days.length) return toast('אין משמרות לייצוא');
+  const sheets = days.map(d => ({ name: ('יום ' + WD[new Date(d).getDay()] + ' ' + fmtD(d)).replace(/[\\/?*[\]:]/g, '.'), g: daySheet(d, slots, lent) }));
+  sheets.push({ name: 'לפי חייל', g: personSheet(days, slots) });
+  const files = [
+    { name: '[Content_Types].xml', data: `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/>${sheets.map((_, i) => `<Override PartName="/xl/worksheets/sheet${i + 1}.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>`).join('')}</Types>` },
+    { name: '_rels/.rels', data: `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>` },
+    { name: 'xl/workbook.xml', data: `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><bookViews><workbookView/></bookViews><sheets>${sheets.map((x, i) => `<sheet name="${xesc(x.name)}" sheetId="${i + 1}" r:id="rId${i + 1}"/>`).join('')}</sheets></workbook>` },
+    { name: 'xl/_rels/workbook.xml.rels', data: `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">${sheets.map((_, i) => `<Relationship Id="rId${i + 1}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet${i + 1}.xml"/>`).join('')}<Relationship Id="rId${sheets.length + 1}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>` },
+    { name: 'xl/styles.xml', data: XL_STYLES },
+    ...sheets.map((x, i) => ({ name: `xl/worksheets/sheet${i + 1}.xml`, data: sheetXml(x.g) })),
+  ];
+  const blob = new Blob([zipStore(files)], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+  const a = document.createElement('a'); a.href = URL.createObjectURL(blob);
+  a.download = `שמירות ${fmtD(days[0]).replace('/', '.')}–${fmtD(days[days.length - 1]).replace('/', '.')}.xlsx`; a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 3000); toast('קובץ האקסל ירד');
 }
 function download(name, text, type) { const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([text], { type })); a.download = name; a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 3000); }
 async function copy(text) { try { await navigator.clipboard.writeText(text); toast('הועתק'); } catch (_) { toast('ההעתקה נחסמה – סמן והעתק ידנית'); } }
@@ -916,9 +1175,12 @@ document.addEventListener('click', async e => {
     case 'setExt': { const name = ($('#extName').value || '').trim() || 'כוח חיצוני'; $('#modal').innerHTML = ''; commit(() => { const a = ensureA(d.key); a.ext = name; a.ids = []; a.cmd = null; }, { replan: true }); break; }
     case 'clearExt': $('#modal').innerHTML = ''; commit(() => { delete ensureA(d.key).ext; }); break;
     case 'pday': ui.day = +d.v; render(); break;
+    case 'pth': ui.pt.h = +d.v; render(); break;
+    case 'ptNow': ui.pt = null; render(); break;
+    case 'xlsx': downloadXlsx(); break;
     case 'openAbs': openAbs(d.p); break;
     case 'preset': {
-      const n = Date.now(), t0 = Math.ceil(n / (30 * MIN)) * 30 * MIN, td = dayStart(n);
+      const { d: td, t0: b0 } = absBase(), f0 = new Date($('#mFrom').value).getTime(), t0 = isNaN(f0) ? b0 : f0;
       const m = { today: [td, addDays(td, 1)], tomorrow: [addDays(td, 1), addDays(td, 2)], h4: [t0, t0 + 4 * H], h8: [t0, t0 + 8 * H], d3: [td, addDays(td, 3)] }[d.v];
       $('#mFrom').value = toLocalInput(m[0]); $('#mTo').value = toLocalInput(m[1]); break;
     }
@@ -966,7 +1228,7 @@ document.addEventListener('click', async e => {
       if (!names.length) return;
       commit(() => names.forEach(name => S.soldiers.push({ id: uid(), name, role, rank: role === 'commander' ? 'primary' : null })), { msg: names.length + ' נוספו' }); break;
     }
-    case 'addTask': commit(() => S.tasks.push({ id: uid(), name: 'משימה חדשה', needed: 2, needsCommander: false, shiftHours: 4, from: '00:00', to: '00:00', bridgeBlocked: false, restAfter: 8, nightRest: null, restPref: null, nightPref: null, isPost: false, allowPosts: false, weight: 1, enabled: true })); break;
+    case 'addTask': commit(() => S.tasks.push({ id: uid(), name: 'משימה חדשה', needed: 2, needsCommander: false, shiftHours: 4, from: '00:00', to: '00:00', bridgeBlocked: false, restAfter: 8, nightRest: null, restPref: null, nightPref: null, borrowFrom: null, isPost: false, allowPosts: false, weight: 1, enabled: true })); break;
     case 'delTask': if (await ask('למחוק את המשימה "' + getT(S, d.id).name + '"?', 'מחק')) commit(() => { S.tasks = S.tasks.filter(t => t.id !== d.id); }); break;
     case 'addBridge': commit(() => S.bridge.push({ from: '12:00', to: '13:00' })); break;
     case 'delBridge': commit(() => S.bridge.splice(+d.id, 1)); break;
@@ -997,12 +1259,14 @@ document.addEventListener('change', async e => {
     try { const st = JSON.parse(await f.text()); if (!st.soldiers || !st.tasks) throw 0; if (await ask('הנתונים הנוכחיים יוחלפו בקובץ. להמשיך?', 'ייבא')) replaceState(st, 'הנתונים יובאו'); } catch (_) { toast('הקובץ לא תקין'); }
     return;
   }
+  if (el.id === 'ptDay') { ui.pt.day = +el.value; return render(); }
+  if (el.id === 'ptHour') { ui.pt.h = +el.value; return render(); }
   const f = el.dataset.f; if (!f) return;
   const id = el.dataset.id, k = el.dataset.k;
   let v = el.type === 'checkbox' ? el.checked : el.type === 'number' ? +el.value : el.value;
   const noReplan = (f === 'soldier' && k === 'name') || (f === 'abs' && k === 'note');
   commit(() => {
-    if (f === 'task') { const t = getT(S, id); if (k === 'needed') v = Math.max(1, Math.round(v) || 1); if (k === 'shiftHours') v = Math.max(0.5, v || 4); if (k === 'restAfter') v = Math.max(0, v || 0); if (['nightRest', 'restPref', 'nightPref'].includes(k)) v = el.value === '' ? null : Math.max(0, v || 0); if (k === 'weight') v = Math.min(1, Math.max(0, v || 0)); t[k] = v; }
+    if (f === 'task') { const t = getT(S, id); if (k === 'needed') v = Math.max(1, Math.round(v) || 1); if (k === 'shiftHours') v = Math.max(0.5, v || 4); if (k === 'restAfter') v = Math.max(0, v || 0); if (['nightRest', 'restPref', 'nightPref'].includes(k)) v = el.value === '' ? null : Math.max(0, v || 0); if (k === 'borrowFrom') v = v || null; if (k === 'weight') v = Math.min(1, Math.max(0, v || 0)); t[k] = v; }
     else if (f === 'home') { const h = S.home.find(x => x.id === id); const ms = el.value ? new Date(el.value).getTime() : null; if (k === 'to') h.to = ms; else if (ms) h.from = ms; }
     else if (f === 'soldier') { const p = getP(S, id); p[k] = v; if (k === 'role') p.rank = v === 'commander' ? 'primary' : null; }
     else if (f === 'bridge') S.bridge[+id][k] = v;
