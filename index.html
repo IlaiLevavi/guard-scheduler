@@ -343,7 +343,7 @@ function autoAssign(st, opts) {
     return slack;
   };
   const byTask = s => getT(st, s.taskId);
-  const queue = open.map(s => ({ s, slack: slackOf(s) })).sort((x, y) => (byTask(x.s).isPost - byTask(y.s).isPost) || x.slack - y.slack || x.s.s - y.s.s);
+  const queue = open.map(s => ({ s, slack: slackOf(s) })).sort((x, y) => (byTask(x.s).isPost - byTask(y.s).isPost) || (opts.byTime ? x.s.s - y.s.s : 0) || x.slack - y.slack || x.s.s - y.s.s);
   // length (h) of the unbroken standby (כרמל) stretch this slot would be part of
   const standbyRun = (pid, s) => {
     const sb = (busy[pid] || []).filter(b => (getT(st, b.key.split('|')[0]) || {}).allowPosts);
@@ -371,7 +371,7 @@ function autoAssign(st, opts) {
       if (inStandby(pid, s)) sc -= 3; // already sitting in כרמל → natural to go up to the post
       if ((getP(st, pid) || {}).role === 'commander') sc += 3; // commanders to posts only when it helps
     }
-    return sc + (hashStr(pid + s.key) % 100) / 1000;
+    return sc + (hashStr(pid + s.key + (opts.salt || '')) % 100) / 1000;
   };
   const prefBad = (pid, s, role) => conflicts(st, pid, s, busy, role, true, true).length > 0;
   const pickBest = (s, role, exclude) => {
@@ -471,19 +471,10 @@ function autoAssign(st, opts) {
     if (!Object.keys(a.borrow).length) delete a.borrow;
   }
   let res = A;
-  // still a commander seat empty? single swaps can't fix it when several commanders must move together –
-  // re-place only the commanders (non-fixed seats) and keep that if it leaves fewer holes
-  if (!opts.cmdRetry) {
-    // empty seats: [in "must be full" tasks (סיור), all] – a full patrol beats one more hole in כרמל / a post
-    const holes = X => { let c = 0, n = 0; for (const s of open) { const t = getT(st, s.taskId), a = X[s.key]; if (!a || a.ext) continue; const h = (t.needsCommander && !a.cmd ? 1 : 0) + Math.max(0, t.needed - a.ids.length); n += h; if (t.borrowFrom) c += h; } return [c, n]; };
-    const [c1, n1] = holes(A), anyCmdHole = open.some(s => { const a = A[s.key]; return a && !a.ext && getT(st, s.taskId).needsCommander && !a.cmd; });
-    if (anyCmdHole) {
-      const B = JSON.parse(JSON.stringify(A));
-      const isCmd = id => (getP(st, id) || {}).role === 'commander';
-      for (const s of open) { const b = B[s.key]; if (!b) continue; if (getT(st, s.taskId).needsCommander) b.cmd = null; b.ids = b.ids.filter(id => !isCmd(id)); }
-      const r2 = autoAssign({ ...st, assign: B }, { ...opts, mode: 'repair', cmdRetry: true }), [c2, n2] = holes(r2.assign);
-      if (c2 < c1 || (c2 === c1 && n2 < n1)) res = r2.assign;
-    }
+  // still a commander seat empty? single swaps can't fix it when several commanders must move together
+  if (!opts.cmdRetry && open.some(s => { const a = A[s.key]; return a && !a.ext && getT(st, s.taskId).needsCommander && !a.cmd; })) {
+    const r2 = cmdReplan({ ...st, assign: A }, now);
+    if (r2.better) res = r2.assign;
   }
   let changed = 0;
   for (const s of slots) {
@@ -500,6 +491,32 @@ function lentMap(st) {
   const m = {};
   for (const a of Object.values(st.assign)) if (a.borrow) for (const pid in a.borrow) if (a.ids.includes(pid)) (m[a.borrow[pid]] = m[a.borrow[pid]] || []).push(pid);
   return m;
+}
+// re-place only the commanders (their non-fixed future seats, posts included), trying several fill orders;
+// keeps the best: fewest holes in "must be full" tasks → fewest holes → fewest "not preferred" seats → fewest changes
+function cmdReplan(st, now) {
+  const slots = buildSlots(st), frozen = s => st.settings.freezePast && s.e <= now, isCmd = id => (getP(st, id) || {}).role === 'commander';
+  const open = slots.filter(s => !s.blocked && !frozen(s) && !(st.assign[s.key] && (st.assign[s.key].locked || st.assign[s.key].ext)));
+  const holes = X => { let c = 0, n = 0; for (const s of open) { const t = getT(st, s.taskId), a = X[s.key] || { ids: [] }; const h = (t.needsCommander && !a.cmd ? 1 : 0) + Math.max(0, t.needed - a.ids.length); n += h; if (t.borrowFrom) c += h; } return [c, n]; };
+  const badness = X => {
+    const busy = makeBusy(); for (const s of slots) { const a = X[s.key]; if (a && !s.blocked) [...a.ids, a.cmd].filter(Boolean).forEach(p => busy.add(p, s.s, s.e, s.key)); }
+    let b = 0; for (const s of open) { const a = X[s.key]; if (a && a.cmd && conflicts(st, a.cmd, s, busy, 'cmd', true, true).length) b++; } return b;
+  };
+  const sig = a => a ? JSON.stringify([[...a.ids].sort(), a.cmd || null]) : '[[],null]';
+  const diff = X => slots.filter(s => sig(st.assign[s.key]) !== sig(X[s.key])).length;
+  const score = X => [...holes(X), badness(X), diff(X)];
+  const lt = (a, b) => { for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return a[i] < b[i]; return false; };
+  const base = score(st.assign);
+  let best = { assign: st.assign, sc: base };
+  for (let v = 0; v < 8; v++) {
+    const B = JSON.parse(JSON.stringify(st.assign));
+    for (const s of open) { const b = B[s.key]; if (!b) continue; if (getT(st, s.taskId).needsCommander) b.cmd = null; b.ids = b.ids.filter(id => !isCmd(id)); }
+    let X = { ...st, assign: B };
+    for (let i = 0; i < 3; i++) { const r = autoAssign(X, { mode: 'repair', now, cmdRetry: true, salt: v ? 'v' + v : '', byTime: v % 2 === 1 }); X = { ...X, assign: r.assign }; if (!r.changed) break; }
+    const sc = score(X.assign);
+    if (lt(sc, best.sc)) best = { assign: X.assign, sc };
+  }
+  return { assign: best.assign, better: best.assign !== st.assign, score: best.sc, base };
 }
 function validate(st, now) {
   const slots = buildSlots(st), sm = slotMap(st, slots), issues = [], lent = lentMap(st);
@@ -783,6 +800,7 @@ function renderSched(issues) {
   let h = rangeBar + ended + `<div class="row noprint" style="margin-bottom:8px">
     <button class="btn" data-act="repair">השלם חוסרים</button>
     <button class="btn sec" data-act="full">שבץ מחדש הכול</button>
+    <button class="btn sec" data-act="cmdReplan" title="מסדר מחדש רק את המפקדים (משמרות לא נעולות) – סבב סיור / כרמל הוגן">סדר מחדש מפקדים</button>
     <button class="btn sec" data-act="xlsx">⬇ טבלת אקסל</button>
     <span style="flex:1"></span>
     <button class="btn sec ${ui.view === 'task' ? '' : ''}" data-act="view" data-v="${ui.view === 'task' ? 'person' : 'task'}">תצוגה: ${ui.view === 'task' ? 'לפי משימה' : 'לפי חייל'}</button></div>
@@ -1223,6 +1241,7 @@ document.addEventListener('click', async e => {
     case 'pth': ui.pt.h = +d.v; render(); break;
     case 'ptNow': ui.pt = null; render(); break;
     case 'xlsx': downloadXlsx(); break;
+    case 'cmdReplan': { const r = cmdReplan(S, Date.now()); if (!r.better) { toast('סידור המפקדים כבר הכי טוב שמצאתי'); break; } commit(() => { S.assign = r.assign; }, { msg: 'המפקדים סודרו מחדש' }); break; }
     case 'openAbs': openAbs(d.p); break;
     case 'preset': {
       const { d: td, t0: b0 } = absBase(), f0 = new Date($('#mFrom').value).getTime(), t0 = isNaN(f0) ? b0 : f0;
@@ -1313,7 +1332,10 @@ document.addEventListener('change', async e => {
   commit(() => {
     if (f === 'task') { const t = getT(S, id); if (k === 'needed') v = Math.max(1, Math.round(v) || 1); if (k === 'shiftHours') v = Math.max(0.5, v || 4); if (k === 'restAfter') v = Math.max(0, v || 0); if (['nightRest', 'restPref', 'nightPref'].includes(k)) v = el.value === '' ? null : Math.max(0, v || 0); if (k === 'borrowFrom') v = v || null; if (k === 'weight') v = Math.min(1, Math.max(0, v || 0)); t[k] = v; }
     else if (f === 'home') { const h = S.home.find(x => x.id === id); const ms = el.value ? new Date(el.value).getTime() : null; if (k === 'to') h.to = ms; else if (ms) h.from = ms; }
-    else if (f === 'soldier') { const p = getP(S, id); p[k] = v; if (k === 'role') p.rank = v === 'commander' ? 'primary' : null; }
+    else if (f === 'soldier') {
+      const p = getP(S, id); p[k] = v; if (k === 'role') p.rank = v === 'commander' ? 'primary' : null;
+      if (k === 'rank' || k === 'role') { const r = cmdReplan(S, Date.now()); if (r.better) S.assign = r.assign; } // commanders changed → re-place them
+    }
     else if (f === 'bridge') S.bridge[+id][k] = v;
     else if (f === 'abs') { const a = S.absences.find(x => x.id === id); a[k] = (k === 'note') ? v : new Date(v).getTime(); if (k !== 'note') normalizeAbsences(S); }
     else if (f === 'set') {
