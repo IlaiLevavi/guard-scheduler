@@ -148,7 +148,7 @@ function defaultState() {
     ],
     bridge: [{ from: '05:00', to: '07:00' }, { from: '16:00', to: '18:00' }],
     absences: [], assign: {}, home: [],
-    settings: { start: dayStart(Date.now()), days: 7, freezePast: true, autoRepair: true },
+    settings: { start: dayStart(Date.now()), days: 7, freezePast: true, autoRepair: true, cmdStandbyAfterPatrol: true },
   };
 }
 // fill in fields added in later versions (old links / saved data)
@@ -272,10 +272,20 @@ function conflicts(st, pid, slot, busy, role, first, pref) {
     }
     const before = b.e <= slot.s, src = before ? bt : myTask, dst = before ? myTask : bt, need = pref ? restPrefOf(src) : restOf(src);
     if (src && dst && src.isPost && dst.allowPosts) continue; // posts are done under the standby (כרמל) umbrella
+    // commanders: straight from patrol into commanding כרמל is allowed when needed (3 commanders ↔ 3 seats around the clock);
+    // the preferred check (pref) still asks for the full rest, so it is only used when nobody else fits
+    if (!pref && st.settings.cmdStandbyAfterPatrol !== false && p.role === 'commander' && src && dst && dst.allowPosts && !src.allowPosts && !src.isPost) continue;
     const gap = before ? slot.s - b.e : b.s - slot.e;
     if (gap < need * H) { out.push({ msg: 'פחות מ-' + need + ' שעות מנוחה אחרי ' + (src ? src.name : '?'), key: b.key, kind: 'rest' }); if (first) return out; continue; }
     const nNeed = pref ? nightPrefOf(src) : nightRestOf(src);
     if (gap < nNeed * H && touchesNight(before ? b.e : slot.e, before ? slot.s : b.s)) { out.push({ msg: 'פחות מ-' + nNeed + ' שעות שינה בלילה אחרי ' + (src ? src.name : '?'), key: b.key, kind: 'rest' }); if (first) return out; }
+  }
+  // preferred only: no more than 16h of standby (כרמל) in a row
+  if (pref && myTask && myTask.allowPosts && !(first && out.length)) {
+    const sb = (busy[pid] || []).filter(b => b.key !== slot.key && (getT(st, b.key.split('|')[0]) || {}).allowPosts);
+    let a = slot.s, e = slot.e, grew = true;
+    while (grew) { grew = false; for (const b of sb) { if (b.e === a) { a = b.s; grew = true; } if (b.s === e) { e = b.e; grew = true; } } }
+    if (e - a > 16 * H) out.push({ msg: 'יותר מ-16 שעות כרמל ברצף', key: null, kind: 'pref' });
   }
   return out;
 }
@@ -334,6 +344,13 @@ function autoAssign(st, opts) {
   };
   const byTask = s => getT(st, s.taskId);
   const queue = open.map(s => ({ s, slack: slackOf(s) })).sort((x, y) => (byTask(x.s).isPost - byTask(y.s).isPost) || x.slack - y.slack || x.s.s - y.s.s);
+  // length (h) of the unbroken standby (כרמל) stretch this slot would be part of
+  const standbyRun = (pid, s) => {
+    const sb = (busy[pid] || []).filter(b => (getT(st, b.key.split('|')[0]) || {}).allowPosts);
+    let a = s.s, e = s.e, grew = true;
+    while (grew) { grew = false; for (const b of sb) { if (b.e === a) { a = b.s; grew = true; } if (b.s === e) { e = b.e; grew = true; } } }
+    return (e - a) / H;
+  };
   const inStandby = (pid, s) => (busy[pid] || []).some(b => b.s < s.e && s.s < b.e && (getT(st, b.key.split('|')[0]) || {}).allowPosts);
   const score = (pid, s) => {
     const t = getT(st, s.taskId), w = weightOf(t), hard = w >= 0.5;
@@ -345,6 +362,10 @@ function autoAssign(st, opts) {
       const gh = Math.max(0, gap) / H;
       sc -= gh * 0.3;
       if (gh < 16) sc += (16 - gh) * 0.8; // avoid hard task after only the minimum rest
+    }
+    if (t.allowPosts) { // more than 16h of כרמל in a row → spread it (commanders rotate סיור → כרמל → כרמל)
+      const run = standbyRun(pid, s);
+      if (run > 16) sc += (run - 16) * 1.5;
     }
     if (t.isPost) {
       if (inStandby(pid, s)) sc -= 3; // already sitting in כרמל → natural to go up to the post
@@ -449,14 +470,29 @@ function autoAssign(st, opts) {
     for (const pid in a.borrow) { const o = A[a.borrow[pid]], ot = o && sm[a.borrow[pid]] && getT(st, sm[a.borrow[pid]].taskId); if (!a.ids.includes(pid) || !o || !ot || o.ids.length >= ot.needed) delete a.borrow[pid]; }
     if (!Object.keys(a.borrow).length) delete a.borrow;
   }
+  let res = A;
+  // still a commander seat empty? single swaps can't fix it when several commanders must move together –
+  // re-place only the commanders (non-fixed seats) and keep that if it leaves fewer holes
+  if (!opts.cmdRetry) {
+    // empty seats: [in "must be full" tasks (סיור), all] – a full patrol beats one more hole in כרמל / a post
+    const holes = X => { let c = 0, n = 0; for (const s of open) { const t = getT(st, s.taskId), a = X[s.key]; if (!a || a.ext) continue; const h = (t.needsCommander && !a.cmd ? 1 : 0) + Math.max(0, t.needed - a.ids.length); n += h; if (t.borrowFrom) c += h; } return [c, n]; };
+    const [c1, n1] = holes(A), anyCmdHole = open.some(s => { const a = A[s.key]; return a && !a.ext && getT(st, s.taskId).needsCommander && !a.cmd; });
+    if (anyCmdHole) {
+      const B = JSON.parse(JSON.stringify(A));
+      const isCmd = id => (getP(st, id) || {}).role === 'commander';
+      for (const s of open) { const b = B[s.key]; if (!b) continue; if (getT(st, s.taskId).needsCommander) b.cmd = null; b.ids = b.ids.filter(id => !isCmd(id)); }
+      const r2 = autoAssign({ ...st, assign: B }, { ...opts, mode: 'repair', cmdRetry: true }), [c2, n2] = holes(r2.assign);
+      if (c2 < c1 || (c2 === c1 && n2 < n1)) res = r2.assign;
+    }
+  }
   let changed = 0;
   for (const s of slots) {
-    const x = st.assign[s.key], y = A[s.key];
+    const x = st.assign[s.key], y = res[s.key];
     const sx = x ? JSON.stringify([[...x.ids].sort(), x.cmd || null]) : '[[],null]';
     const sy = y ? JSON.stringify([[...y.ids].sort(), y.cmd || null]) : '[[],null]';
     if (sx !== sy) changed++;
   }
-  return { assign: A, changed };
+  return { assign: res, changed };
 }
 
 // seats of a standby shift that were lent to a "must be full" task: {slotKey: [pid]}
@@ -646,7 +682,15 @@ document.addEventListener('visibilitychange', () => { if (!document.hidden) poll
 // when the schedule loads: non-locked future seats that break a rule, or can get a better break, are re-filled
 // (a no-op when nothing needs it, so viewing alone normally changes nothing)
 function healOnLoad() { const ch = runAuto('repair'); if (ch) toast('עודכנו ' + ch + ' משמרות לפי כללי המנוחה'); return ch; }
-function runAuto(mode) { const r = autoAssign(S, { mode, now: Date.now() }); S.assign = r.assign; return r.changed; }
+function runAuto(mode) {
+  // a repair can open a new possibility for the next one – repeat (max 3) so reopening the page changes nothing
+  const before = JSON.stringify(S.assign), now = Date.now();
+  let r = autoAssign(S, { mode, now }); S.assign = r.assign;
+  for (let i = 0; i < 2 && r.changed; i++) { r = autoAssign(S, { mode: 'repair', now }); S.assign = r.assign; }
+  if (JSON.stringify(S.assign) === before) return 0;
+  const old = JSON.parse(before), sig = a => a ? JSON.stringify([[...a.ids].sort(), a.cmd || null]) : '[[],null]';
+  return new Set([...Object.keys(old), ...Object.keys(S.assign)]).size && [...new Set([...Object.keys(old), ...Object.keys(S.assign)])].filter(k => sig(old[k]) !== sig(S.assign[k])).length;
+}
 function commit(fn, o) {
   o = o || {};
   undoStack.push(JSON.stringify(S)); if (undoStack.length > 40) undoStack.shift();
@@ -908,6 +952,7 @@ function renderSet() {
     <label>מספר ימים ${f('set', 0, 'days', g.days, 'number', 'min="1" max="31"')}</label></div>
     <div style="margin-top:8px"><label><input type="checkbox" data-f="set" data-id="0" data-k="freezePast" ${g.freezePast ? 'checked' : ''}> אל תשנה משמרות שכבר עברו</label></div>
     <div><label><input type="checkbox" data-f="set" data-id="0" data-k="autoRepair" ${g.autoRepair ? 'checked' : ''}> שבץ מחדש אוטומטית אחרי כל שינוי בנוכחות/הגדרות</label></div>
+    <div><label><input type="checkbox" data-f="set" data-id="0" data-k="cmdStandbyAfterPatrol" ${g.cmdStandbyAfterPatrol !== false ? 'checked' : ''}> מפקד יכול לפקד על כרמל מיד אחרי סיור – רק כשאין מפקד אחר (כשיש רק 3 מפקדים)</label></div>
     <p><button class="btn danger sm" data-act="resetAll">איפוס מלא לברירת מחדל</button></p></div>`;
   return gen + tasks + br + sol;
 }
