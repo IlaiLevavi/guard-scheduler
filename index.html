@@ -138,6 +138,15 @@ function migrate(st) {
     if (t.isPost === undefined) { t.isPost = t.name === 'שג'; t.allowPosts = /^כרמל/.test(t.name); }
     if (t.weight == null) t.weight = t.allowPosts ? 0.25 : 1;
   });
+  // drop seats that point at a person who no longer exists (shows as "?" and can't be edited)
+  const ids = new Set(st.soldiers.map(p => p.id));
+  let dropped = 0;
+  for (const a of Object.values(st.assign || {})) {
+    const n = a.ids.length; a.ids = a.ids.filter(id => ids.has(id)); dropped += n - a.ids.length;
+    if (a.cmd && !ids.has(a.cmd)) { a.cmd = null; dropped++; }
+  }
+  st.absences = (st.absences || []).filter(x => ids.has(x.pid));
+  migrate.dropped = dropped;
   return st;
 }
 const weightOf = t => (t && t.weight != null ? +t.weight : 1);
@@ -478,7 +487,9 @@ async function api(method, path, body) {
 }
 function adoptRemote(j, msg) {
   S = migrate(Object.assign(defaultState(), j.data)); S.settings = Object.assign(defaultState().settings, S.settings);
-  sync.ver = j.ver; undoStack = []; localSave(); render(); if (msg) toast(msg);
+  sync.ver = j.ver; undoStack = [];
+  if (migrate.dropped && S.settings.autoRepair) { runAuto('repair'); save(); } else localSave();
+  render(); if (msg) toast(msg);
 }
 function queuePush() { sync.dirty = true; setSync('saving'); clearTimeout(sync.timer); sync.timer = setTimeout(pushNow, 500); }
 async function pushNow() {
@@ -610,6 +621,7 @@ function card(s, t, iss, now) {
   const chip = (pid, seat, cls) => {
     if (!pid) return `<button class="person empty" data-act="seat" data-key="${esc(s.key)}" data-seat="${seat}">+ ${seat === 'c' ? 'מפקד' : 'חסר'}</button>`;
     const p = getP(S, pid);
+    if (!p) return chip(null, seat, cls);
     return `<button class="person ${cls} ${badP.has(pid) ? 'bad' : ''}" data-act="seat" data-key="${esc(s.key)}" data-seat="${seat}">${esc(p ? p.name : '?')}</button>`;
   };
   let chips = '';
@@ -830,7 +842,7 @@ function replaceState(st, msg) { commit(() => { S = migrate(Object.assign(defaul
 function openSeat(key, seat) {
   const slots = buildSlots(S), sm = slotMap(S, slots), slot = sm[key]; if (!slot) return;
   const t = getT(S, slot.taskId), a = S.assign[key] || { ids: [], cmd: null };
-  const isC = seat === 'c', role = isC ? 'cmd' : 'soldier', cur = isC ? a.cmd : a.ids[+seat];
+  const isC = seat === 'c', role = isC ? 'cmd' : 'soldier', cur0 = isC ? a.cmd : a.ids[+seat], cur = getP(S, cur0) ? cur0 : null;
   const busy = makeBusy();
   for (const s of slots) { const x = S.assign[s.key]; if (x && !s.blocked) [...x.ids, x.cmd].filter(Boolean).forEach(pid => busy.add(pid, s.s, s.e, s.key)); }
   const st = personStats(S);
@@ -911,7 +923,7 @@ document.addEventListener('click', async e => {
     case 'clearOld': commit(() => { S.absences = S.absences.filter(a => a.to > Date.now()); }, { replan: false }); break;
     case 'presReport': { const t = $('#repText'); t.value = presenceText(ui.day); t.style.display = 'block'; $('#repBtns').style.display = 'block'; break; }
     case 'copyText': copy($('#' + d.from).value); break;
-    case 'delSoldier': if (await ask('למחוק את ' + getP(S, d.id).name + '?', 'מחק')) commit(() => { S.soldiers = S.soldiers.filter(p => p.id !== d.id); S.absences = S.absences.filter(a => a.pid !== d.id); }); break;
+    case 'delSoldier': if (await ask('למחוק את ' + getP(S, d.id).name + '?', 'מחק')) commit(() => { S.soldiers = S.soldiers.filter(p => p.id !== d.id); S.absences = S.absences.filter(a => a.pid !== d.id); migrate(S); }); break;
     case 'bulkAdd': {
       const names = $('#bulk').value.split('\n').map(x => x.trim()).filter(Boolean), role = $('#bulkRole').value;
       if (!names.length) return;
@@ -975,6 +987,7 @@ document.addEventListener('keydown', e => { if (e.key === 'Escape') $('#modal').
   S = migrate(Object.assign(defaultState(), S)); S.settings = Object.assign(defaultState().settings, S.settings);
   // note: an ended range is NOT wiped any more – the schedule tab offers "+ הוסף יום" instead
   if (fresh) { runAuto('full'); save(); }
+  else if (migrate.dropped && S.settings.autoRepair) { runAuto('repair'); localSave(); }
   render();
   // fixed shared link: #s=<id> (or the last one this device used)
   const sm = location.hash.match(/#s=([a-z0-9]{6,32})/);
